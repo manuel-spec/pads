@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +12,7 @@ import (
 	"pads/internal/config"
 	"pads/internal/model"
 	"pads/internal/probe"
+	"pads/internal/scheduler"
 	"pads/internal/ui"
 	"pads/internal/util"
 	"pads/internal/writer"
@@ -89,7 +89,12 @@ func (d *Downloader) runSegmented(
 	downloadID := uuid.NewString()
 	tempDir := d.cfg.StatePath("tmp", downloadID)
 
-	segments, err := BuildSegments(profile.ContentLength, d.connectionCount(profile), d.cfg.MinSegmentSize)
+	maxConns := d.cfg.MaxConnections
+	if profile.RecommendedConns > 0 && profile.RecommendedConns < maxConns {
+		maxConns = profile.RecommendedConns
+	}
+
+	segments, err := BuildSegments(profile.ContentLength, maxConns, d.cfg.MinSegmentSize)
 	if err != nil {
 		return fmt.Errorf("plan segments: %w", err)
 	}
@@ -98,33 +103,36 @@ func (d *Downloader) runSegmented(
 	bar := progress.AddBar("download")
 	defer progress.Wait()
 
-	var (
-		wg      sync.WaitGroup
-		errOnce sync.Once
-		runErr  error
-	)
-
-	for i := range segments {
-		wg.Add(1)
-		go func(seg *model.Segment) {
-			defer wg.Done()
-			if err := d.downloadSegment(ctx, url, seg, tempDir, bar); err != nil {
-				seg.Status = model.SegmentFailed
-				errOnce.Do(func() { runErr = fmt.Errorf("segment %s: %w", seg.ID, err) })
-			}
-		}(&segments[i])
-	}
-	wg.Wait()
-
-	if runErr != nil {
-		return runErr
+	manager := scheduler.NewSegmentManager(segments, profile.ContentLength, d.cfg.MinSegmentSize)
+	monitor := scheduler.NewBandwidthMonitor(0)
+	worker := &adaptiveWorker{
+		downloader: d,
+		url:        url,
+		tempDir:    tempDir,
+		bar:        bar,
+		manager:    manager,
+		monitor:    monitor,
 	}
 
-	if err := writer.MergeSegments(segmentPaths(segments), output, profile.ContentLength); err != nil {
+	if err := scheduler.Run(ctx, scheduler.Options{
+		Config:      d.cfg,
+		Profile:     profile,
+		Manager:     manager,
+		Monitor:     monitor,
+		Worker:      worker,
+		TotalSize:   profile.ContentLength,
+		MaxConns:    maxConns,
+		InitialConn: d.cfg.InitialConnections,
+	}); err != nil {
+		return err
+	}
+
+	mergedSegments := manager.Segments()
+	if err := writer.MergeSegments(segmentPaths(mergedSegments), output, profile.ContentLength); err != nil {
 		return fmt.Errorf("merge segments: %w", err)
 	}
 
-	for _, path := range segmentPaths(segments) {
+	for _, path := range segmentPaths(mergedSegments) {
 		_ = writer.RemoveTemp(path)
 	}
 

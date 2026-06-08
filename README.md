@@ -4,7 +4,7 @@ PADS is a Go CLI download manager with segmented downloads, adaptive connection 
 
 ## Status
 
-Phase C (segmented download) is complete. `pads get <url>` uses parallel range-based segments when supported, falls back to single-connection mode otherwise, and merges segment temp files atomically. Adaptive scheduling arrives in Phase D.
+Phase D (adaptive scheduler) is complete. Segmented downloads ramp connections, monitor bandwidth trends, steal work from slow segments in cruise phase, and stabilize during tail. Resume and queue persistence arrive in Phase E.
 
 ## Requirements
 
