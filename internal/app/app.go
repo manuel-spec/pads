@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"pads/internal/config"
+	"pads/internal/downloader"
+	"pads/internal/util"
 )
 
 // App wires configuration and core services for CLI commands.
@@ -26,8 +28,21 @@ func (a *App) EnsureDirs() error {
 	return config.EnsureStateDirs(a.Config)
 }
 
-// Download is a placeholder for the download orchestration entry point.
+// Download runs a single-file download.
 func (a *App) Download(ctx context.Context, url, output string) error {
-	_ = ctx
-	return fmt.Errorf("download not yet implemented: %s -> %s", url, output)
+	if _, err := util.ValidateURL(url); err != nil {
+		return err
+	}
+	if output == "" {
+		name, err := util.FilenameFromURL(url)
+		if err != nil {
+			return err
+		}
+		output = name
+	}
+	if err := a.EnsureDirs(); err != nil {
+		return err
+	}
+	dl := downloader.New(a.Config)
+	return dl.Run(ctx, downloader.Options{URL: url, Output: output})
 }
