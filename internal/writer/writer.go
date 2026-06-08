@@ -98,6 +98,63 @@ func MergeFile(tempPath, outputPath string) error {
 	return nil
 }
 
+// MergeSegments concatenates completed segment temp files into the final output.
+func MergeSegments(segmentPaths []string, outputPath string, expectedSize int64) error {
+	if len(segmentPaths) == 0 {
+		return fmt.Errorf("no segment files to merge")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+
+	tmpOut := outputPath + ".tmp"
+	dst, err := os.OpenFile(tmpOut, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open output temp file: %w", err)
+	}
+
+	var total int64
+	for i, path := range segmentPaths {
+		src, err := os.Open(path)
+		if err != nil {
+			dst.Close()
+			_ = os.Remove(tmpOut)
+			return fmt.Errorf("open segment %d for merge: %w", i, err)
+		}
+
+		n, copyErr := io.Copy(dst, src)
+		closeErr := src.Close()
+		if copyErr != nil {
+			dst.Close()
+			_ = os.Remove(tmpOut)
+			return fmt.Errorf("copy segment %d: %w", i, copyErr)
+		}
+		if closeErr != nil {
+			dst.Close()
+			_ = os.Remove(tmpOut)
+			return fmt.Errorf("close segment %d: %w", i, closeErr)
+		}
+		total += n
+	}
+
+	if err := dst.Close(); err != nil {
+		_ = os.Remove(tmpOut)
+		return fmt.Errorf("close output temp file: %w", err)
+	}
+
+	if expectedSize > 0 && total != expectedSize {
+		_ = os.Remove(tmpOut)
+		return fmt.Errorf("merged size %d does not match expected %d", total, expectedSize)
+	}
+
+	if err := os.Rename(tmpOut, outputPath); err != nil {
+		_ = os.Remove(tmpOut)
+		return fmt.Errorf("commit output file: %w", err)
+	}
+	return nil
+}
+
 // RemoveTemp removes a temp file if it exists.
 func RemoveTemp(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,7 +39,7 @@ func New(cfg *config.Config) *Downloader {
 	}
 }
 
-// Run executes a download using single-connection mode for Phase B.
+// Run probes the server and downloads using segmented or single-connection mode.
 func (d *Downloader) Run(ctx context.Context, opts Options) error {
 	parsed, err := util.ValidateURL(opts.URL)
 	if err != nil {
@@ -57,6 +58,93 @@ func (d *Downloader) Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("probe server: %w", err)
 	}
 
+	if d.shouldUseSegments(profile) {
+		return d.runSegmented(ctx, parsed.String(), output, profile)
+	}
+	return d.runSingle(ctx, parsed.String(), output, profile)
+}
+
+func (d *Downloader) shouldUseSegments(profile *model.ServerProfile) bool {
+	return profile.RangeSupported &&
+		profile.ContentLength > 0 &&
+		profile.ContentLengthTrusted
+}
+
+func (d *Downloader) connectionCount(profile *model.ServerProfile) int {
+	count := d.cfg.InitialConnections
+	if profile.RecommendedConns > 0 && profile.RecommendedConns < count {
+		count = profile.RecommendedConns
+	}
+	if count > d.cfg.MaxConnections {
+		count = d.cfg.MaxConnections
+	}
+	return count
+}
+
+func (d *Downloader) runSegmented(
+	ctx context.Context,
+	url, output string,
+	profile *model.ServerProfile,
+) error {
+	downloadID := uuid.NewString()
+	tempDir := d.cfg.StatePath("tmp", downloadID)
+
+	segments, err := BuildSegments(profile.ContentLength, d.connectionCount(profile), d.cfg.MinSegmentSize)
+	if err != nil {
+		return fmt.Errorf("plan segments: %w", err)
+	}
+
+	progress := ui.NewProgress(profile.ContentLength)
+	bar := progress.AddBar("download")
+	defer progress.Wait()
+
+	var (
+		wg      sync.WaitGroup
+		errOnce sync.Once
+		runErr  error
+	)
+
+	for i := range segments {
+		wg.Add(1)
+		go func(seg *model.Segment) {
+			defer wg.Done()
+			if err := d.downloadSegment(ctx, url, seg, tempDir, bar); err != nil {
+				seg.Status = model.SegmentFailed
+				errOnce.Do(func() { runErr = fmt.Errorf("segment %s: %w", seg.ID, err) })
+			}
+		}(&segments[i])
+	}
+	wg.Wait()
+
+	if runErr != nil {
+		return runErr
+	}
+
+	if err := writer.MergeSegments(segmentPaths(segments), output, profile.ContentLength); err != nil {
+		return fmt.Errorf("merge segments: %w", err)
+	}
+
+	for _, path := range segmentPaths(segments) {
+		_ = writer.RemoveTemp(path)
+	}
+
+	progress.Complete(profile.ContentLength)
+	return nil
+}
+
+func segmentPaths(segments []model.Segment) []string {
+	paths := make([]string, len(segments))
+	for i, seg := range segments {
+		paths[i] = seg.TempPath
+	}
+	return paths
+}
+
+func (d *Downloader) runSingle(
+	ctx context.Context,
+	url, output string,
+	profile *model.ServerProfile,
+) error {
 	downloadID := uuid.NewString()
 	tempDir := d.cfg.StatePath("tmp", downloadID)
 	segmentID := "seg-0"
@@ -70,7 +158,7 @@ func (d *Downloader) Run(ctx context.Context, opts Options) error {
 	bar := progress.AddBar("download")
 	defer progress.Wait()
 
-	total, err := d.downloadAll(ctx, parsed.String(), segWriter, bar, profile.ContentLength)
+	total, err := d.downloadAll(ctx, url, segWriter, bar, profile.ContentLength)
 	if err != nil {
 		return err
 	}
