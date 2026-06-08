@@ -149,6 +149,19 @@ func (m *SegmentManager) Activate(id string) (*model.Segment, bool) {
 	return nil, false
 }
 
+// RequeueAllActive moves every active segment back to pending.
+func (m *SegmentManager) RequeueAllActive() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i := range m.segments {
+		if m.segments[i].Status == model.SegmentActive {
+			m.segments[i].Status = model.SegmentPending
+			m.segments[i].UpdatedAt = time.Now()
+		}
+	}
+}
+
 // RequeueActive returns an interrupted active segment to pending.
 func (m *SegmentManager) RequeueActive(id string) {
 	m.mu.Lock()

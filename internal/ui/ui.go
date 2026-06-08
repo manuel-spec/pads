@@ -69,10 +69,9 @@ func (p *Progress) Wait() {
 	p.container.Wait()
 }
 
-// Complete gives the UI a moment to render the final state.
+// Complete stops progress rendering after a successful download.
 func (p *Progress) Complete(bytes int64) {
-	if bytes > 0 {
-		time.Sleep(100 * time.Millisecond)
-	}
-	p.container.Wait()
+	_ = bytes
+	time.Sleep(50 * time.Millisecond)
+	p.container.Shutdown()
 }

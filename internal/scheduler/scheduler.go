@@ -33,6 +33,7 @@ type Options struct {
 	TotalSize   int64
 	MaxConns    int
 	InitialConn int
+	OnTick      func() error
 }
 
 // Scheduler coordinates adaptive connection scaling and segment stealing.
@@ -119,6 +120,9 @@ func (s *Scheduler) tick(ctx context.Context) {
 
 	s.phase = resolvePhase(fraction, s.opts.Manager.AllComplete())
 	s.applyScaling(ctx, fraction)
+	if s.opts.OnTick != nil {
+		_ = s.opts.OnTick()
+	}
 }
 
 func resolvePhase(remainingFraction float64, done bool) model.SchedulerPhase {

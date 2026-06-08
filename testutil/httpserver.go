@@ -5,13 +5,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"time"
 )
 
 // FileServerOptions configures the test HTTP file server.
 type FileServerOptions struct {
-	Content     []byte
-	ContentType string
+	Content      []byte
+	ContentType  string
 	SupportRange bool
+	ReadDelay    time.Duration
+	ChunkSize    int
 }
 
 // NewFileServer returns an httptest server serving static content.
@@ -61,10 +64,29 @@ func NewFileServer(opts FileServerOptions) *httptest.Server {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(opts.Content)))
 		w.Header().Set("Content-Length", strconv.Itoa(len(chunk)))
 		w.WriteHeader(http.StatusPartialContent)
-		_, _ = w.Write(chunk)
+		writeThrottled(w, chunk, opts.ChunkSize, opts.ReadDelay)
 	})
 
 	return httptest.NewServer(handler)
+}
+
+func writeThrottled(w http.ResponseWriter, data []byte, chunkSize int, delay time.Duration) {
+	if chunkSize <= 0 {
+		chunkSize = len(data)
+	}
+	for offset := 0; offset < len(data); offset += chunkSize {
+		end := offset + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		_, _ = w.Write(data[offset:end])
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
 }
 
 func parseRange(header string, size int) (int, int, error) {
