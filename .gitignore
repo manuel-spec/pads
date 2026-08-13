@@ -27,3 +27,7 @@ Thumbs.db
 
 # Local state (for dev)
 .pads/
+
+.env
+.env.local
+.env.*.local
