@@ -10,6 +10,7 @@ import (
 
 	"pads/internal/config"
 	"pads/internal/downloader"
+	"pads/internal/model"
 	"pads/internal/queue"
 	"pads/internal/state"
 	"pads/internal/util"
@@ -22,6 +23,9 @@ type App struct {
 	queue    *queue.Store
 	registry *Registry
 }
+
+// DownloadState re-exports the persisted download model.
+type DownloadState = model.DownloadState
 
 // New creates an application instance with loaded configuration.
 func New() (*App, error) {
@@ -40,6 +44,31 @@ func New() (*App, error) {
 // EnsureDirs creates required state directories.
 func (a *App) EnsureDirs() error {
 	return config.EnsureStateDirs(a.Config)
+}
+
+// LoadState returns persisted download state by ID.
+func (a *App) LoadState(id string) (*model.DownloadState, error) {
+	return a.state.Load(id)
+}
+
+// StateStore exposes the persisted-state store for daemon operations.
+func (a *App) StateStore() *state.Store {
+	return a.state
+}
+
+// ActiveIDs lists in-process active download IDs.
+func (a *App) ActiveIDs() []string {
+	return a.registry.ActiveIDs()
+}
+
+// IsDownloadActive reports whether a download runs in this process.
+func (a *App) IsDownloadActive(id string) bool {
+	return a.registry.IsActive(id)
+}
+
+// FilenameForURL derives a safe filename from a URL.
+func FilenameForURL(url string) (string, error) {
+	return util.FilenameFromURL(url)
 }
 
 // Download runs a single-file download with persistence.
@@ -242,4 +271,9 @@ func (a *App) QueueRemove(id string) error {
 		return err
 	}
 	return a.queue.Remove(id)
+}
+
+// QueueUpdateStatus sets one queue entry's status.
+func (a *App) QueueUpdateStatus(id string, status queue.EntryStatus, errText string) error {
+	return a.queue.UpdateEntryStatus(id, status, errText)
 }
