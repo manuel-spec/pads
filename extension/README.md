@@ -58,6 +58,32 @@ token that lives in a browser profile is a token that leaks with the profile.
    Re-run it whenever the `pads` binary moves; the manifest records an absolute
    path. Windows locates the manifest through a registry key and is not handled.
 
+   **Flatpak browsers** keep their configuration under
+   `~/.var/app/<app-id>/` and never read the locations above. The installer
+   detects them and registers there as well, reporting them as
+   `chrome (flatpak)`. A machine with both builds of one browser gets both
+   registered, since they share nothing.
+
+   A Flatpak browser is also sandboxed and cannot see the `pads` binary or
+   `~/.pads`. The installer prints the grant it needs:
+
+   ```bash
+   flatpak override --user \
+     --filesystem=/path/to/pads/dir:ro \
+     --filesystem=~/.pads:ro \
+     com.google.Chrome
+   ```
+
+   That is the whole requirement: the host reads the daemon's address and
+   token, then reaches it over loopback, which a Flatpak browser already
+   shares with the host. Undo it with
+   `flatpak override --user --reset <app-id>`.
+
+   The other route, `flatpak-spawn --host`, runs the host outside the sandbox
+   and keeps the token out of the browser, but needs
+   `--talk-name=org.freedesktop.Flatpak`, which lets the browser run arbitrary
+   commands on the host. PADS does not use it.
+
 3. Start a daemon:
 
    ```bash
@@ -68,7 +94,14 @@ token that lives in a browser profile is a token that leaks with the profile.
 
    **Chrome, Brave, Chromium, Edge** — open `chrome://extensions` (or
    `brave://extensions`), turn on Developer mode, choose **Load unpacked**, and
-   pick `dist/extension/chrome`.
+   pick `dist/extension/chrome`. Note that this is the *built* directory, not
+   `extension/`, which holds the shared sources and one manifest per browser
+   rather than a loadable `manifest.json`.
+
+   A Flatpak browser can only read directories it has been granted, so it may
+   not see `dist/` at all. Either pick the folder through the browser's own
+   file chooser, which grants access through the document portal, or copy the
+   built directory somewhere already shared, such as `~/Downloads`.
 
    **Firefox** — open `about:debugging#/runtime/this-firefox`, choose **Load
    Temporary Add-on**, and pick `dist/extension/firefox/manifest.json`. A
