@@ -200,11 +200,10 @@ func (d *Downloader) runSegmented(
 		_ = writer.RemoveTemp(path)
 	}
 
-	downloadState.Complete = true
-	downloadState.Paused = false
-	downloadState.Segments = mergedSegments
 	if opts.Store != nil {
-		_ = opts.Store.Delete(downloadState.ID)
+		if err := opts.Store.Delete(downloadState.ID); err != nil {
+			return err
+		}
 	}
 
 	progress.Complete(profile.ContentLength)
@@ -315,7 +314,9 @@ func (d *Downloader) runSingle(
 	_ = writer.RemoveTemp(segWriter.Path())
 
 	if opts.Store != nil {
-		_ = opts.Store.Delete(downloadState.ID)
+		if err := opts.Store.Delete(downloadState.ID); err != nil {
+			return err
+		}
 	}
 
 	progress.Complete(total)
@@ -345,13 +346,24 @@ func (d *Downloader) downloadAll(
 	}
 	defer resp.Body.Close()
 
-	if offset > 0 && resp.StatusCode != http.StatusPartialContent {
-		if resp.StatusCode != http.StatusOK {
-			return offset, fmt.Errorf("unexpected status %d for resume", resp.StatusCode)
+	switch {
+	case resp.StatusCode == http.StatusPartialContent && offset > 0:
+		// Server honoured the resume range.
+	case resp.StatusCode == http.StatusOK:
+		if offset > 0 {
+			// The server ignored the Range header and is sending the whole
+			// file. Appending it would concatenate a second copy onto the
+			// partial one, so start the temp file over.
+			if err := segWriter.Truncate(0); err != nil {
+				return offset, err
+			}
+			offset = 0
+			if onProgress != nil {
+				onProgress(0)
+			}
 		}
-	}
-	if offset == 0 && resp.StatusCode != http.StatusOK {
-		return offset, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	default:
+		return offset, fmt.Errorf("unexpected status %d for download", resp.StatusCode)
 	}
 
 	totalSize := expectedSize
