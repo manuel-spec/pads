@@ -20,6 +20,7 @@ type Config struct {
 	RetryBackoffMS     int    `json:"retry_backoff_ms"`
 	ProbeTimeoutMS     int    `json:"probe_timeout_ms"`
 	StateDir           string `json:"state_dir"`
+	DownloadDir        string `json:"download_dir"`
 }
 
 // Default returns the default configuration.
@@ -37,6 +38,7 @@ func Default() *Config {
 		RetryBackoffMS:     1000,
 		ProbeTimeoutMS:     5000,
 		StateDir:           filepath.Join(home, ".pads"),
+		DownloadDir:        filepath.Join(home, "Downloads"),
 	}
 }
 
@@ -127,6 +129,9 @@ func (c *Config) Validate() error {
 	if c.StateDir == "" {
 		return fmt.Errorf("state_dir cannot be empty")
 	}
+	if c.DownloadDir == "" {
+		return fmt.Errorf("download_dir cannot be empty")
+	}
 	return nil
 }
 
@@ -171,6 +176,8 @@ func (c *Config) Set(key, value string) error {
 		c.ProbeTimeoutMS = v
 	case "state_dir":
 		c.StateDir = value
+	case "download_dir":
+		c.DownloadDir = value
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
 	}

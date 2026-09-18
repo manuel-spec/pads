@@ -134,3 +134,48 @@ func TestCloseCancelsRunningJobs(t *testing.T) {
 		t.Fatalf("start after close = %v, want %v", err, ErrShuttingDown)
 	}
 }
+
+// A job's byte counters must track the download, not stay frozen at whatever
+// was true when the job was registered. The extension popup renders them.
+func TestJobProgressTracksDownload(t *testing.T) {
+	content := bytes.Repeat([]byte("pads"), 128*1024)
+	server := testutil.NewFileServer(testutil.FileServerOptions{
+		Content:      content,
+		SupportRange: true,
+		ChunkSize:    1024,
+		ReadDelay:    5 * time.Millisecond,
+	})
+	defer server.Close()
+
+	manager, _ := newTestManager(t)
+	output := filepath.Join(t.TempDir(), "file.bin")
+
+	id, err := manager.Start(server.URL, output)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Catch it mid-flight: bytes and total must both be populated from state.
+	deadline := time.Now().Add(10 * time.Second)
+	sawProgress := false
+	for time.Now().Before(deadline) {
+		job, ok := manager.Get(id)
+		if ok && job.Bytes > 0 && job.Total == int64(len(content)) {
+			sawProgress = true
+			break
+		}
+		if ok && job.Status != JobRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !sawProgress {
+		t.Fatal("job never reported in-flight progress")
+	}
+
+	final := waitForJob(t, manager, id, JobComplete)
+	if final.Bytes != int64(len(content)) || final.Total != int64(len(content)) {
+		t.Fatalf("completed job = %d/%d bytes, want %d/%d",
+			final.Bytes, final.Total, len(content), len(content))
+	}
+}

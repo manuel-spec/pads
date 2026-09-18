@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "PADS Download Handoff",
+  "version": "0.1.0",
+  "description": "Send Firefox downloads to the PADS download manager instead of Firefox's own downloader.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "pads@localhost",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": [
+    "downloads",
+    "nativeMessaging",
+    "storage",
+    "notifications",
+    "contextMenus"
+  ],
+  "background": {
+    "scripts": [
+      "host.js",
+      "background.js"
+    ]
+  },
+  "action": {
+    "default_title": "PADS",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icons/pads.svg",
+      "96": "icons/pads.svg"
+    }
+  },
+  "icons": {
+    "48": "icons/pads.svg",
+    "96": "icons/pads.svg"
+  }
+}

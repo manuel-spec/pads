@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PADS</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="brand">PADS</span>
+      <span id="daemon" class="status status--unknown">checking</span>
+    </header>
+
+    <label class="toggle">
+      <input type="checkbox" id="capture" />
+      <span>Capture Firefox downloads</span>
+    </label>
+
+    <p id="hint" class="hint" hidden></p>
+
+    <ul id="jobs" class="jobs"></ul>
+    <p id="empty" class="empty" hidden>No downloads yet.</p>
+
+    <script src="host.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>
