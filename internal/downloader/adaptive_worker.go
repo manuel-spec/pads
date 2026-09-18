@@ -60,7 +60,15 @@ func (d *Downloader) fetchSegmentAdaptive(
 	var err error
 
 	if seg.BytesDownloaded > 0 && seg.TempPath != "" {
-		segWriter, err = writer.ResumeSegmentTemp(seg.TempPath)
+		// A steal can shorten a segment while its worker is still writing, so
+		// the recorded progress may run past the segment's new end. Clamp it,
+		// then let the writer reconcile the file with what is accounted for.
+		var usable int64
+		segWriter, usable, err = writer.ResumeSegmentTempAt(seg.TempPath, min(seg.BytesDownloaded, seg.ByteLength()))
+		if err == nil && usable != seg.BytesDownloaded {
+			seg.BytesDownloaded = usable
+			manager.SetProgress(seg.ID, usable)
+		}
 	} else {
 		segWriter, err = writer.OpenSegmentTemp(tempDir, seg.ID)
 	}
@@ -110,7 +118,7 @@ func (d *Downloader) fetchSegmentAdaptive(
 	}
 
 	seg.TempPath = segWriter.Path()
-	seg.BytesDownloaded = seg.ByteLength()
+	seg.BytesDownloaded = rangeStart - seg.ByteStart + written
 	seg.UpdatedAt = time.Now()
 	return nil
 }
