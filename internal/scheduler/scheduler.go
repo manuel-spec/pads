@@ -11,11 +11,11 @@ import (
 )
 
 const (
-	defaultTickInterval         = 500 * time.Millisecond
-	tailRemainingFraction       = 0.10
-	scaleUpVelocityThreshold    = 0.05
-	scaleDownVelocityThreshold  = -0.15
-	scaleCooldownTicks          = 3
+	defaultTickInterval        = 500 * time.Millisecond
+	tailRemainingFraction      = 0.10
+	scaleUpVelocityThreshold   = 0.05
+	scaleDownVelocityThreshold = -0.15
+	scaleCooldownTicks         = 3
 )
 
 // SegmentWorker downloads one segment until completion or cancellation.
@@ -38,15 +38,15 @@ type Options struct {
 
 // Scheduler coordinates adaptive connection scaling and segment stealing.
 type Scheduler struct {
-	opts            Options
-	phase           model.SchedulerPhase
-	activeWorkers   int
-	scaleCooldown   int
-	workersMu       sync.Mutex
-	workerCancels   map[string]context.CancelFunc
-	firstErr        error
-	errOnce         sync.Once
-	wg              sync.WaitGroup
+	opts          Options
+	scaleCooldown int
+	phaseMu       sync.RWMutex
+	phase         model.SchedulerPhase
+	workersMu     sync.Mutex
+	workerCancels map[string]context.CancelFunc
+	firstErr      error
+	errOnce       sync.Once
+	wg            sync.WaitGroup
 }
 
 // Run executes the adaptive download lifecycle.
@@ -118,8 +118,9 @@ func (s *Scheduler) tick(ctx context.Context) {
 		fraction = float64(remaining) / float64(s.opts.TotalSize)
 	}
 
-	s.phase = resolvePhase(fraction, s.opts.Manager.AllComplete())
-	s.applyScaling(ctx, fraction)
+	phase := resolvePhase(fraction, s.opts.Manager.AllComplete())
+	s.setPhase(phase)
+	s.applyScaling(ctx, phase)
 	if s.opts.OnTick != nil {
 		_ = s.opts.OnTick()
 	}
@@ -138,7 +139,7 @@ func resolvePhase(remainingFraction float64, done bool) model.SchedulerPhase {
 	return model.PhaseCruise
 }
 
-func (s *Scheduler) applyScaling(ctx context.Context, remainingFraction float64) {
+func (s *Scheduler) applyScaling(ctx context.Context, phase model.SchedulerPhase) {
 	if s.scaleCooldown > 0 {
 		s.scaleCooldown--
 	}
@@ -147,7 +148,14 @@ func (s *Scheduler) applyScaling(ctx context.Context, remainingFraction float64)
 	active := s.opts.Manager.ActiveCount()
 	pending := s.opts.Manager.PendingCount()
 
-	switch s.phase {
+	// A segment requeued by a steal or a cancelled worker must not wait for a
+	// scale-up decision when nothing is running at all.
+	if active == 0 && pending > 0 {
+		s.startNextWorker(ctx)
+		return
+	}
+
+	switch phase {
 	case model.PhaseRamp:
 		if pending > 0 && active < s.opts.MaxConns && s.scaleCooldown == 0 {
 			if velocity >= 0 || active < s.opts.InitialConn {
@@ -184,12 +192,11 @@ func (s *Scheduler) trySteal(ctx context.Context) {
 		return
 	}
 
+	// The stolen worker's request still covers the old, longer range, so it
+	// has to stop. It requeues its own segment on the way out; re-claiming it
+	// here would race that exit and leave the segment active with no worker.
 	s.cancelWorker(stolenID)
-	s.opts.Manager.RequeueActive(stolenID)
 
-	if seg, ok := s.opts.Manager.Activate(stolenID); ok {
-		s.launchWorker(ctx, seg)
-	}
 	if seg, ok := s.opts.Manager.Activate(newSeg.ID); ok {
 		s.launchWorker(ctx, seg)
 	}
@@ -220,7 +227,6 @@ func (s *Scheduler) launchWorker(ctx context.Context, seg *model.Segment) {
 	s.workersMu.Unlock()
 
 	s.wg.Add(1)
-	s.activeWorkers++
 
 	go func(segmentID string) {
 		defer s.wg.Done()
@@ -228,7 +234,6 @@ func (s *Scheduler) launchWorker(ctx context.Context, seg *model.Segment) {
 			s.workersMu.Lock()
 			delete(s.workerCancels, segmentID)
 			s.workersMu.Unlock()
-			s.activeWorkers--
 		}()
 
 		current, ok := s.opts.Manager.Get(segmentID)
@@ -238,6 +243,8 @@ func (s *Scheduler) launchWorker(ctx context.Context, seg *model.Segment) {
 
 		if err := s.opts.Worker.Download(workerCtx, current); err != nil {
 			if workerCtx.Err() != nil {
+				// Writing has stopped, so the segment is safe to hand back.
+				s.opts.Manager.RequeueActive(segmentID)
 				return
 			}
 			s.opts.Manager.Fail(segmentID)
@@ -266,5 +273,13 @@ func (s *Scheduler) cancelAll() {
 
 // Phase returns the current scheduler phase.
 func (s *Scheduler) Phase() model.SchedulerPhase {
+	s.phaseMu.RLock()
+	defer s.phaseMu.RUnlock()
 	return s.phase
+}
+
+func (s *Scheduler) setPhase(phase model.SchedulerPhase) {
+	s.phaseMu.Lock()
+	defer s.phaseMu.Unlock()
+	s.phase = phase
 }
