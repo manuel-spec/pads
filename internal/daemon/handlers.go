@@ -12,6 +12,9 @@ import (
 type startRequest struct {
 	URL    string `json:"url"`
 	Output string `json:"output,omitempty"`
+	// Headers are forwarded to the origin server, letting a caller hand over
+	// the session a download needs. Only a fixed set is accepted.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type startResponse struct {
@@ -42,7 +45,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "url is required"})
 		return
 	}
-	id, err := s.manager.Start(req.URL, req.Output)
+	id, err := s.manager.Start(req.URL, req.Output, req.Headers)
 	if err != nil {
 		writeJSON(w, statusForJobError(err, http.StatusBadRequest), errorResponse{Error: err.Error()})
 		return

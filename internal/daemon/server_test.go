@@ -154,3 +154,31 @@ func TestShutdownEndpointSignalsOnce(t *testing.T) {
 		t.Fatal("shutdown was not signalled")
 	}
 }
+
+// The daemon rejects headers it does not forward, before starting any job.
+func TestStartRejectsUnforwardableHeaders(t *testing.T) {
+	api, token := newAuthTestServer(t)
+	httpServer := httptest.NewServer(api.http.Handler)
+	defer httpServer.Close()
+
+	body := strings.NewReader(`{"url":"http://example.test/f.bin","headers":{"Host":"evil.test"}}`)
+	req, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/v1/downloads", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpServer.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	if len(api.manager.List()) != 0 {
+		t.Fatal("a job was created despite the rejected header")
+	}
+}

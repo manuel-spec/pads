@@ -12,6 +12,7 @@ import (
 
 	"pads/internal/app"
 	"pads/internal/queue"
+	"pads/internal/util"
 )
 
 // JobStatus describes the lifecycle state of a background job.
@@ -98,13 +99,18 @@ func (m *Manager) endJob(id string) {
 }
 
 // Start launches a download in the background and returns its job ID.
-func (m *Manager) Start(url, output string) (string, error) {
+func (m *Manager) Start(url, output string, headers map[string]string) (string, error) {
 	if output == "" {
 		name, err := app.FilenameForURL(url)
 		if err != nil {
 			return "", err
 		}
 		output = name
+	}
+	// Reject bad headers before the job exists, so the caller gets the error
+	// instead of a job that fails a moment later for reasons it cannot see.
+	if _, err := util.ValidateHeaders(headers); err != nil {
+		return "", err
 	}
 	id := uuid.NewString()
 
@@ -118,7 +124,8 @@ func (m *Manager) Start(url, output string) (string, error) {
 
 	go func() {
 		defer m.endJob(id)
-		m.finish(id, m.app.DownloadWithID(jobCtx, id, url, output), jobCtx.Err())
+		req := app.DownloadRequest{ID: id, URL: url, Output: output, Headers: headers}
+		m.finish(id, m.app.Start(jobCtx, req), jobCtx.Err())
 	}()
 	return id, nil
 }

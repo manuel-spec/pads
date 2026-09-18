@@ -71,7 +71,7 @@ func TestStartedJobOutlivesRequestContext(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "file.bin")
 	client := &Client{addr: httpServer.Listener.Addr().String(), token: token, http: httpServer.Client()}
 
-	id, err := client.Start(context.Background(), server.URL, output)
+	id, err := client.Start(context.Background(), server.URL, output, nil)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestCloseCancelsRunningJobs(t *testing.T) {
 	manager, _ := newTestManager(t)
 	output := filepath.Join(t.TempDir(), "file.bin")
 
-	id, err := manager.Start(server.URL, output)
+	id, err := manager.Start(server.URL, output, nil)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestCloseCancelsRunningJobs(t *testing.T) {
 		t.Fatalf("job status = %s, want %s", job.Status, JobPaused)
 	}
 
-	if _, err := manager.Start(server.URL, output); err != ErrShuttingDown {
+	if _, err := manager.Start(server.URL, output, nil); err != ErrShuttingDown {
 		t.Fatalf("start after close = %v, want %v", err, ErrShuttingDown)
 	}
 }
@@ -150,7 +150,7 @@ func TestJobProgressTracksDownload(t *testing.T) {
 	manager, _ := newTestManager(t)
 	output := filepath.Join(t.TempDir(), "file.bin")
 
-	id, err := manager.Start(server.URL, output)
+	id, err := manager.Start(server.URL, output, nil)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
