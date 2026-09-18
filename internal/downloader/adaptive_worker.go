@@ -85,6 +85,7 @@ func (d *Downloader) fetchSegmentAdaptive(
 	if err != nil {
 		return fmt.Errorf("create segment request: %w", err)
 	}
+	util.ApplyHeaders(req, d.headers)
 	req.Header.Set("Range", formatRange(rangeStart, seg.ByteEnd))
 
 	resp, err := util.DoRequest(ctx, d.client, req)

@@ -89,9 +89,12 @@ type DownloadState struct {
 	TempDir   string    `json:"temp_dir,omitempty"`
 	Segmented bool      `json:"segmented"`
 	Paused    bool      `json:"paused"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Complete  bool      `json:"complete"`
+	// Headers are forwarded request headers, which may include session
+	// cookies. State files holding them are written 0600.
+	Headers   map[string]string `json:"headers,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
+	Complete  bool              `json:"complete"`
 }
 
 // SchedulerPhase describes the current scheduler phase.

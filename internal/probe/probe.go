@@ -15,6 +15,9 @@ import (
 // Options configures server probing behavior.
 type Options struct {
 	Timeout time.Duration
+	// Headers are forwarded request headers. A probe that does not carry the
+	// caller's session sees a login page instead of the file.
+	Headers map[string]string
 }
 
 // Probe inspects a remote server and returns a scheduling profile.
@@ -35,6 +38,8 @@ func Probe(ctx context.Context, client *http.Client, url string, opts Options) (
 	if err != nil {
 		return nil, fmt.Errorf("create head request: %w", err)
 	}
+
+	util.ApplyHeaders(headReq, opts.Headers)
 
 	headResp, err := util.DoRequest(ctx, client, headReq)
 	if err != nil {
@@ -61,7 +66,7 @@ func Probe(ctx context.Context, client *http.Client, url string, opts Options) (
 		profile.RecommendedConns = recommendConnections(profile.ContentLength, profile.LatencyMS)
 	}
 
-	if err := verifyRangeSupport(ctx, client, url, profile); err != nil {
+	if err := verifyRangeSupport(ctx, client, url, profile, opts.Headers); err != nil {
 		profile.RangeSupported = false
 		profile.RecommendedConns = 1
 	}
@@ -92,7 +97,13 @@ func parseContentLength(resp *http.Response) (int64, bool) {
 	return length, true
 }
 
-func verifyRangeSupport(ctx context.Context, client *http.Client, url string, profile *model.ServerProfile) error {
+func verifyRangeSupport(
+	ctx context.Context,
+	client *http.Client,
+	url string,
+	profile *model.ServerProfile,
+	headers map[string]string,
+) error {
 	if !profile.RangeSupported {
 		return nil
 	}
@@ -101,6 +112,7 @@ func verifyRangeSupport(ctx context.Context, client *http.Client, url string, pr
 	if err != nil {
 		return fmt.Errorf("create range request: %w", err)
 	}
+	util.ApplyHeaders(req, headers)
 	req.Header.Set("Range", "bytes=0-0")
 
 	resp, err := util.DoRequest(ctx, client, req)
