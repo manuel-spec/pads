@@ -8,8 +8,8 @@ Phase E (persistence) is complete, and a background daemon now owns long-running
 downloads so `status`, `pause`, and `resume` work across processes. Remaining
 Phase F work: ADRs, benchmarks, `pads schedule`, and raising test coverage.
 
-A Firefox extension in `extension/` hands browser downloads to the daemon
-through a native-messaging bridge.
+A browser extension in `extension/` hands downloads to the daemon through a
+native-messaging bridge; it runs in Firefox, Chrome, Brave, Chromium, and Edge.
 
 ## Requirements
 
@@ -48,7 +48,7 @@ pads daemon run [--addr 127.0.0.1:0]
 pads daemon status
 pads daemon stop
 
-pads nativehost install [--extension-id <id>]
+pads nativehost install [--browser chrome,brave,firefox,...]
 pads nativehost uninstall
 ```
 
@@ -68,22 +68,24 @@ another daemon has died.
 
 `pads get` still downloads in the foreground so it can draw a progress bar.
 
-### Firefox extension
+### Browser extension
 
-`extension/firefox` is a WebExtension that hands Firefox's downloads to the
-daemon. It reaches the daemon through `pads nativehost`, a stdio bridge Firefox
-launches itself, so the bearer token never enters the browser and the daemon's
-refusal of browser-origin requests stays intact.
+`extension/` is a WebExtension that hands the browser's downloads to the daemon.
+It runs in Firefox and in the Chromium family: Chrome, Brave, Chromium, and
+Edge. It reaches the daemon through `pads nativehost`, a stdio bridge the
+browser launches itself, so the bearer token never enters the browser and the
+daemon's refusal of browser-origin requests stays intact.
 
 ```bash
+make extension
 pads nativehost install
 pads daemon run
 ```
 
-Then load `extension/firefox/manifest.json` as a temporary add-on from
-`about:debugging`. See [extension/README.md](extension/README.md) for the full
-setup, including the opt-in permission that lets downloads behind a login carry
-your browser session.
+Then load `dist/extension/chrome` as an unpacked extension, or
+`dist/extension/firefox/manifest.json` as a temporary add-on. See
+[extension/README.md](extension/README.md) for per-browser setup and the opt-in
+permission that lets downloads behind a login carry your browser session.
 
 ## Configuration
 
@@ -102,6 +104,8 @@ pads config set download_dir /data/downloads
 ```bash
 make test
 make test-race
+make extension        # build dist/extension/{chrome,firefox}
+make extension-check  # load each background entry under stub APIs
 ```
 
 ## License
