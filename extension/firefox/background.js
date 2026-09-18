@@ -2,11 +2,19 @@
 
 // Captures Firefox downloads and hands them to the PADS daemon.
 //
-// The handoff happens before Firefox's download is cancelled, not after. If
-// PADS is unreachable the browser's own download simply carries on, which costs
-// a few duplicated bytes but never loses a download to a daemon that is down.
+// The download is paused the moment Firefox creates it, before the handoff is
+// attempted. Pausing is reversible, so neither outcome loses anything: on
+// success the paused download is cancelled and PADS has the file, and on
+// failure it resumes exactly where it stopped. Handing off first and cancelling
+// afterwards would download the opening bytes twice; cancelling first would
+// throw the download away if the daemon turned out to be unreachable.
 
 let settings = { ...PADS_DEFAULTS };
+
+// URLs this extension asked Firefox to download itself, after a handoff failed
+// and the paused download could not be resumed. Skipped once so the retry is
+// not captured straight back into the same failure.
+const handBack = new Set();
 
 async function refreshSettings() {
   settings = await loadSettings();
@@ -25,19 +33,27 @@ async function handleCreated(item) {
   if (!shouldCapture(item)) {
     return;
   }
+  if (handBack.delete(item.url)) {
+    return;
+  }
+
+  // Stop the bytes first. Everything after this is reversible.
+  const paused = await pauseDownload(item.id);
 
   const reply = await callHost({
     type: "start",
     url: item.url,
     filename: baseName(item.filename),
+    headers: await sessionHeaders(item),
   });
 
   if (!reply.ok) {
-    await notify("PADS handoff failed", `${reply.error}\nFirefox is keeping this download.`);
+    await handBackToFirefox(item, paused);
+    await notify("PADS handoff failed", `${reply.error}\nFirefox is downloading it instead.`);
     return;
   }
 
-  await stopBrowserDownload(item.id);
+  await discardBrowserDownload(item.id);
   await notify("Sent to PADS", reply.output || item.url);
 }
 
@@ -45,25 +61,67 @@ function shouldCapture(item) {
   if (!settings.capture || !item || typeof item.url !== "string") {
     return false;
   }
-  // blob:, data: and ftp: downloads have no URL the daemon could re-fetch.
+  // blob: and data: URLs exist only inside the page; there is nothing for the
+  // daemon to re-fetch.
   if (!/^https?:\/\//i.test(item.url)) {
     return false;
   }
   if (item.state === "complete" || item.state === "interrupted") {
     return false;
   }
-  // A known-small file is not worth the round trip through a segmented
-  // downloader; fileSize is -1 until the server reports one.
+  // A known-small file is not worth a segmented downloader. fileSize is -1
+  // until the server reports one.
   if (settings.minBytes > 0 && item.fileSize > 0 && item.fileSize < settings.minBytes) {
     return false;
   }
   return true;
 }
 
-// stopBrowserDownload tears down Firefox's copy once PADS owns the transfer.
-// Each step is optional: the download may have finished or been removed in the
-// time the handoff took.
-async function stopBrowserDownload(id) {
+async function pauseDownload(id) {
+  try {
+    await browser.downloads.pause(id);
+    return true;
+  } catch (err) {
+    // Too fast to pause, or already finished. The handoff still runs; the
+    // duplicate is bounded by whatever Firefox managed in that window.
+    return false;
+  }
+}
+
+// handBackToFirefox restores the download the extension interfered with.
+// Resuming is preferred because it keeps the bytes already on disk; a download
+// the server will not resume has to be started again from scratch.
+async function handBackToFirefox(item, paused) {
+  if (paused) {
+    try {
+      await browser.downloads.resume(item.id);
+      return;
+    } catch (err) {
+      // Not resumable; fall through and re-issue it.
+    }
+  }
+
+  try {
+    const current = await browser.downloads.search({ id: item.id });
+    if (current.length > 0 && current[0].state === "in_progress" && !current[0].paused) {
+      return;
+    }
+  } catch (err) {
+    // Fall through and re-issue.
+  }
+
+  handBack.add(item.url);
+  try {
+    await browser.downloads.download({ url: item.url });
+  } catch (err) {
+    handBack.delete(item.url);
+  }
+}
+
+// discardBrowserDownload tears down Firefox's copy once PADS owns the transfer.
+// Each step is optional: the download may have finished or been removed while
+// the handoff was in flight.
+async function discardBrowserDownload(id) {
   try {
     await browser.downloads.cancel(id);
   } catch (err) {
@@ -72,12 +130,52 @@ async function stopBrowserDownload(id) {
   try {
     await browser.downloads.removeFile(id);
   } catch (err) {
-    // Only completed downloads have a file to remove.
+    // Only a completed download has a file to remove.
   }
   try {
     await browser.downloads.erase({ id });
   } catch (err) {
-    // Leaving a history entry behind is harmless.
+    // A leftover history entry is harmless.
+  }
+}
+
+// sessionHeaders collects what the daemon needs to fetch a file that is behind
+// a login. It returns nothing unless the user has granted the optional cookie
+// permission, so the default install sends no session data anywhere.
+async function sessionHeaders(item) {
+  if (!(await hasSessionPermission())) {
+    return {};
+  }
+
+  const headers = {};
+  const cookie = await cookieHeader(item.url);
+  if (cookie) {
+    headers["Cookie"] = cookie;
+  }
+  if (item.referrer && /^https?:\/\//i.test(item.referrer)) {
+    headers["Referer"] = item.referrer;
+  }
+  if (navigator.userAgent) {
+    headers["User-Agent"] = navigator.userAgent;
+  }
+  return headers;
+}
+
+async function cookieHeader(url) {
+  try {
+    // firstPartyDomain: null returns cookies whether or not first-party
+    // isolation is on; without it an isolated profile yields nothing.
+    let cookies = [];
+    try {
+      cookies = await browser.cookies.getAll({ url, firstPartyDomain: null });
+    } catch (err) {
+      cookies = await browser.cookies.getAll({ url });
+    }
+    return cookies
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join("; ");
+  } catch (err) {
+    return "";
   }
 }
 
@@ -107,7 +205,12 @@ browser.contextMenus.onClicked.addListener(async (info) => {
     return;
   }
 
-  const reply = await callHost({ type: "start", url, filename: "" });
+  const reply = await callHost({
+    type: "start",
+    url,
+    filename: "",
+    headers: await sessionHeaders({ url, referrer: info.pageUrl }),
+  });
   if (!reply.ok) {
     await notify("PADS could not start the download", reply.error);
     return;
