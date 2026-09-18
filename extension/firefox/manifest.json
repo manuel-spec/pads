@@ -33,5 +33,11 @@
   "icons": {
     "48": "icons/pads.svg",
     "96": "icons/pads.svg"
-  }
+  },
+  "optional_permissions": [
+    "cookies"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ]
 }

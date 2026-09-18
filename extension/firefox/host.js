@@ -40,6 +40,22 @@ function describeHostError(err) {
   return text;
 }
 
+// PADS_SESSION_PERMISSION is what session forwarding needs: reading cookies,
+// for any site a download might come from. It is optional and off by default,
+// so a plain install sends no session data to the daemon.
+const PADS_SESSION_PERMISSION = {
+  permissions: ["cookies"],
+  origins: ["<all_urls>"],
+};
+
+async function hasSessionPermission() {
+  try {
+    return await browser.permissions.contains(PADS_SESSION_PERMISSION);
+  } catch (err) {
+    return false;
+  }
+}
+
 async function loadSettings() {
   try {
     const stored = await browser.storage.local.get(PADS_DEFAULTS);
