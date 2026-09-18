@@ -1,5 +1,13 @@
 "use strict";
 
+// Chromium exposes the extension APIs as chrome.*; Firefox exposes both, with
+// browser.* being the promise-based one. Normalising on browser.* lets one
+// source tree serve both. Chromium's chrome.* returns promises too when no
+// callback is passed, which is why the manifest sets a minimum version.
+if (typeof globalThis.browser === "undefined") {
+  globalThis.browser = globalThis.chrome;
+}
+
 // Shared helpers for talking to the PADS native-messaging host. Loaded by both
 // the background script and the popup; native messaging is available from any
 // extension context that holds the permission, so neither has to proxy for the
@@ -74,6 +82,10 @@ function baseName(name) {
   const parts = name.replace(/\\/g, "/").split("/");
   return parts[parts.length - 1] || "";
 }
+
+// PADS_ICON is required by Chromium's notifications API, which rejects a
+// notification with no icon. Firefox accepts one either way.
+const PADS_ICON = "icons/pads-128.png";
 
 function formatBytes(bytes) {
   const value = Number(bytes) || 0;

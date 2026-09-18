@@ -1,6 +1,13 @@
 "use strict";
 
-// Captures Firefox downloads and hands them to the PADS daemon.
+// Chromium runs this as a service worker and loads only this file, so it pulls
+// in the shared helpers itself. Firefox lists both scripts in its manifest and
+// has no importScripts, which is what the guard tests for.
+if (typeof importScripts === "function") {
+  importScripts("host.js");
+}
+
+// Captures browser downloads and hands them to the PADS daemon.
 //
 // The download is paused the moment Firefox creates it, before the handoff is
 // attempted. Pausing is reversible, so neither outcome loses anything: on
@@ -11,10 +18,71 @@
 
 let settings = { ...PADS_DEFAULTS };
 
-// URLs this extension asked Firefox to download itself, after a handoff failed
-// and the paused download could not be resumed. Skipped once so the retry is
-// not captured straight back into the same failure.
-const handBack = new Set();
+// URLs this extension asked the browser to download itself, after a handoff
+// failed and the paused download could not be resumed. Skipped once so the
+// retry is not captured straight back into the same failure.
+//
+// Chromium can stop the service worker between the re-issue and the download
+// that follows it, so this lives in session storage where available; an
+// in-memory set alone would let that pair loop.
+const HAND_BACK_KEY = "padsHandBack";
+const HAND_BACK_TTL_MS = 5 * 60 * 1000;
+const handBackMemory = new Set();
+
+function sessionStore() {
+  return (browser.storage && browser.storage.session) || null;
+}
+
+async function markHandBack(url) {
+  const store = sessionStore();
+  if (!store) {
+    handBackMemory.add(url);
+    return;
+  }
+  try {
+    const held = (await store.get(HAND_BACK_KEY))[HAND_BACK_KEY] || {};
+    held[url] = Date.now();
+    await store.set({ [HAND_BACK_KEY]: pruneHandBack(held) });
+  } catch (err) {
+    handBackMemory.add(url);
+  }
+}
+
+// takeHandBack reports whether this URL was one the extension re-issued, and
+// clears it so only that one download is let through.
+async function takeHandBack(url) {
+  if (handBackMemory.delete(url)) {
+    return true;
+  }
+  const store = sessionStore();
+  if (!store) {
+    return false;
+  }
+  try {
+    const held = (await store.get(HAND_BACK_KEY))[HAND_BACK_KEY] || {};
+    if (!(url in held)) {
+      return false;
+    }
+    delete held[url];
+    await store.set({ [HAND_BACK_KEY]: pruneHandBack(held) });
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+// pruneHandBack drops stale entries so a re-issue that never arrived does not
+// exempt that URL from capture for the rest of the session.
+function pruneHandBack(held) {
+  const cutoff = Date.now() - HAND_BACK_TTL_MS;
+  const kept = {};
+  for (const [url, at] of Object.entries(held)) {
+    if (at >= cutoff) {
+      kept[url] = at;
+    }
+  }
+  return kept;
+}
 
 async function refreshSettings() {
   settings = await loadSettings();
@@ -33,7 +101,7 @@ async function handleCreated(item) {
   if (!shouldCapture(item)) {
     return;
   }
-  if (handBack.delete(item.url)) {
+  if (await takeHandBack(item.url)) {
     return;
   }
 
@@ -48,8 +116,8 @@ async function handleCreated(item) {
   });
 
   if (!reply.ok) {
-    await handBackToFirefox(item, paused);
-    await notify("PADS handoff failed", `${reply.error}\nFirefox is downloading it instead.`);
+    await handBackToBrowser(item, paused);
+    await notify("PADS handoff failed", `${reply.error}\nThe browser is downloading it instead.`);
     return;
   }
 
@@ -88,10 +156,10 @@ async function pauseDownload(id) {
   }
 }
 
-// handBackToFirefox restores the download the extension interfered with.
+// handBackToBrowser restores the download the extension interfered with.
 // Resuming is preferred because it keeps the bytes already on disk; a download
 // the server will not resume has to be started again from scratch.
-async function handBackToFirefox(item, paused) {
+async function handBackToBrowser(item, paused) {
   if (paused) {
     try {
       await browser.downloads.resume(item.id);
@@ -110,11 +178,11 @@ async function handBackToFirefox(item, paused) {
     // Fall through and re-issue.
   }
 
-  handBack.add(item.url);
+  await markHandBack(item.url);
   try {
     await browser.downloads.download({ url: item.url });
   } catch (err) {
-    handBack.delete(item.url);
+    await takeHandBack(item.url);
   }
 }
 
@@ -225,6 +293,7 @@ async function notify(title, message) {
   try {
     await browser.notifications.create({
       type: "basic",
+      iconUrl: browser.runtime.getURL(PADS_ICON),
       title,
       message: String(message).slice(0, 300),
     });
