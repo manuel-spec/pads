@@ -35,6 +35,24 @@ type Browser struct {
 	// markers are paths, relative to home, whose presence means the browser is
 	// installed. An empty directory list means it is not.
 	markers map[string][]string
+	// flatpakID is the Flatpak application ID, empty when PADS knows of no
+	// Flatpak build.
+	flatpakID string
+	// flatpakDirs is the manifest directory relative to ~/.var/app/<id>/. A
+	// Flatpak browser keeps its own configuration tree and never reads the one
+	// under ~/.config, so registering the native location alone leaves it with
+	// no host at all.
+	flatpakDirs []string
+}
+
+// Target is one directory a browser reads host manifests from. A machine can
+// carry both a native and a Flatpak build of the same browser, and they share
+// nothing.
+type Target struct {
+	Browser      string
+	Flatpak      bool
+	FlatpakAppID string
+	Dir          string
 }
 
 // SupportedBrowsers lists every browser the installer knows about.
@@ -54,6 +72,8 @@ var SupportedBrowsers = []Browser{
 			"linux":  {".mozilla"},
 			"darwin": {"Library", "Application Support", "Mozilla"},
 		},
+		flatpakID:   "org.mozilla.firefox",
+		flatpakDirs: []string{".mozilla", "native-messaging-hosts"},
 	},
 	{
 		Name: "chrome",
@@ -65,6 +85,8 @@ var SupportedBrowsers = []Browser{
 			"linux":  {".config", "google-chrome"},
 			"darwin": {"Library", "Application Support", "Google", "Chrome"},
 		},
+		flatpakID:   "com.google.Chrome",
+		flatpakDirs: []string{"config", "google-chrome", "NativeMessagingHosts"},
 	},
 	{
 		Name: "brave",
@@ -76,6 +98,8 @@ var SupportedBrowsers = []Browser{
 			"linux":  {".config", "BraveSoftware", "Brave-Browser"},
 			"darwin": {"Library", "Application Support", "BraveSoftware", "Brave-Browser"},
 		},
+		flatpakID:   "com.brave.Browser",
+		flatpakDirs: []string{"config", "BraveSoftware", "Brave-Browser", "NativeMessagingHosts"},
 	},
 	{
 		Name: "chromium",
@@ -87,6 +111,8 @@ var SupportedBrowsers = []Browser{
 			"linux":  {".config", "chromium"},
 			"darwin": {"Library", "Application Support", "Chromium"},
 		},
+		flatpakID:   "org.chromium.Chromium",
+		flatpakDirs: []string{"config", "chromium", "NativeMessagingHosts"},
 	},
 	{
 		Name: "edge",
@@ -98,6 +124,8 @@ var SupportedBrowsers = []Browser{
 			"linux":  {".config", "microsoft-edge"},
 			"darwin": {"Library", "Application Support", "Microsoft Edge"},
 		},
+		flatpakID:   "com.microsoft.Edge",
+		flatpakDirs: []string{"config", "microsoft-edge", "NativeMessagingHosts"},
 	},
 }
 
@@ -121,7 +149,8 @@ func LookupBrowser(name string) (Browser, bool) {
 	return Browser{}, false
 }
 
-// ManifestDir returns the directory this browser reads host manifests from.
+// ManifestDir returns the directory a native install of this browser reads host
+// manifests from.
 func (b Browser) ManifestDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -137,9 +166,24 @@ func (b Browser) ManifestDir() (string, error) {
 	return filepath.Join(append([]string{home}, parts...)...), nil
 }
 
-// Installed reports whether the browser appears to be present, so that "install
-// everywhere" does not create configuration directories for browsers the user
-// does not have.
+// FlatpakManifestDir returns the directory a Flatpak build of this browser reads
+// host manifests from. A Flatpak browser's configuration lives under
+// ~/.var/app/<id> and it never reads the native location.
+func (b Browser) FlatpakManifestDir() (string, error) {
+	if b.flatpakID == "" {
+		return "", fmt.Errorf("no Flatpak build is known for %s", b.Name)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	parts := append([]string{home, ".var", "app", b.flatpakID}, b.flatpakDirs...)
+	return filepath.Join(parts...), nil
+}
+
+// Installed reports whether a native build appears to be present, so that
+// "install everywhere" does not create configuration directories for browsers
+// the user does not have.
 func (b Browser) Installed() bool {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -151,6 +195,41 @@ func (b Browser) Installed() bool {
 	}
 	info, err := os.Stat(filepath.Join(append([]string{home}, parts...)...))
 	return err == nil && info.IsDir()
+}
+
+// FlatpakInstalled reports whether a Flatpak build is present.
+func (b Browser) FlatpakInstalled() bool {
+	if b.flatpakID == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(home, ".var", "app", b.flatpakID))
+	return err == nil && info.IsDir()
+}
+
+// Targets lists every manifest directory this browser actually reads on this
+// machine. Both builds can be installed at once and they share nothing.
+func (b Browser) Targets() []Target {
+	var targets []Target
+	if b.Installed() {
+		if dir, err := b.ManifestDir(); err == nil {
+			targets = append(targets, Target{Browser: b.Name, Dir: dir})
+		}
+	}
+	if b.FlatpakInstalled() {
+		if dir, err := b.FlatpakManifestDir(); err == nil {
+			targets = append(targets, Target{
+				Browser:      b.Name,
+				Flatpak:      true,
+				FlatpakAppID: b.flatpakID,
+				Dir:          dir,
+			})
+		}
+	}
+	return targets
 }
 
 // manifest is a native-messaging host manifest. The two families disagree on
@@ -178,6 +257,8 @@ type Options struct {
 // InstallResult reports one browser's registration.
 type InstallResult struct {
 	Browser      string
+	Flatpak      bool
+	FlatpakAppID string
 	ManifestPath string
 }
 
@@ -190,12 +271,25 @@ func Install(opts Options) ([]InstallResult, string, error) {
 		opts.ChromiumID = DefaultChromiumID
 	}
 
-	targets := opts.Browsers
-	if len(targets) == 0 {
-		for _, b := range SupportedBrowsers {
-			if b.Installed() {
-				targets = append(targets, b)
+	browsers := opts.Browsers
+	if len(browsers) == 0 {
+		browsers = SupportedBrowsers
+	}
+
+	var targets []Target
+	for _, browser := range browsers {
+		found := browser.Targets()
+		if len(found) == 0 && len(opts.Browsers) > 0 {
+			// Named explicitly but nothing detected: fall back to the native
+			// location rather than refusing to register anything.
+			dir, err := browser.ManifestDir()
+			if err != nil {
+				return nil, "", err
 			}
+			found = []Target{{Browser: browser.Name, Dir: dir}}
+		}
+		for _, target := range found {
+			targets = append(targets, target)
 		}
 	}
 	if len(targets) == 0 {
@@ -209,13 +303,13 @@ func Install(opts Options) ([]InstallResult, string, error) {
 	}
 
 	results := make([]InstallResult, 0, len(targets))
-	for _, browser := range targets {
-		dir, err := browser.ManifestDir()
-		if err != nil {
-			return nil, "", err
+	for _, target := range targets {
+		browser, ok := LookupBrowser(target.Browser)
+		if !ok {
+			return nil, "", fmt.Errorf("unknown browser %q", target.Browser)
 		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, "", fmt.Errorf("create %s manifest directory: %w", browser.Name, err)
+		if err := os.MkdirAll(target.Dir, 0o755); err != nil {
+			return nil, "", fmt.Errorf("create %s manifest directory: %w", target.Browser, err)
 		}
 
 		doc := manifest{
@@ -232,16 +326,34 @@ func Install(opts Options) ([]InstallResult, string, error) {
 
 		encoded, err := json.MarshalIndent(doc, "", "  ")
 		if err != nil {
-			return nil, "", fmt.Errorf("encode %s manifest: %w", browser.Name, err)
+			return nil, "", fmt.Errorf("encode %s manifest: %w", target.Browser, err)
 		}
 
-		path := filepath.Join(dir, HostName+".json")
+		path := filepath.Join(target.Dir, HostName+".json")
 		if err := os.WriteFile(path, append(encoded, '\n'), 0o644); err != nil {
-			return nil, "", fmt.Errorf("write %s manifest: %w", browser.Name, err)
+			return nil, "", fmt.Errorf("write %s manifest: %w", target.Browser, err)
 		}
-		results = append(results, InstallResult{Browser: browser.Name, ManifestPath: path})
+		results = append(results, InstallResult{
+			Browser:      target.Browser,
+			Flatpak:      target.Flatpak,
+			FlatpakAppID: target.FlatpakAppID,
+			ManifestPath: path,
+		})
 	}
 	return results, wrapperPath, nil
+}
+
+// FlatpakOverride is the command that lets a sandboxed browser reach the host.
+//
+// The sandbox cannot see the pads binary or the daemon's control file, so both
+// are granted read-only. That is the whole of what the host needs: it reads the
+// daemon's address and token, then talks to it over loopback, which a Flatpak
+// browser already shares with the host.
+func FlatpakOverride(appID, binaryDir, stateDir string) string {
+	return fmt.Sprintf(
+		"flatpak override --user --filesystem=%s:ro --filesystem=%s:ro %s",
+		binaryDir, stateDir, appID,
+	)
 }
 
 // writeWrapper creates the script the browser executes. A manifest's path is
@@ -274,19 +386,24 @@ func Uninstall(stateDir string) ([]string, error) {
 	var removed []string
 
 	for _, browser := range SupportedBrowsers {
-		dir, err := browser.ManifestDir()
-		if err != nil {
-			// Unsupported on this platform, so nothing was ever written.
-			continue
+		var dirs []string
+		if dir, err := browser.ManifestDir(); err == nil {
+			dirs = append(dirs, dir)
 		}
-		path := filepath.Join(dir, HostName+".json")
-		if err := os.Remove(path); err != nil {
-			if !os.IsNotExist(err) {
-				return removed, fmt.Errorf("remove %s: %w", path, err)
+		if dir, err := browser.FlatpakManifestDir(); err == nil {
+			dirs = append(dirs, dir)
+		}
+
+		for _, dir := range dirs {
+			path := filepath.Join(dir, HostName+".json")
+			if err := os.Remove(path); err != nil {
+				if !os.IsNotExist(err) {
+					return removed, fmt.Errorf("remove %s: %w", path, err)
+				}
+				continue
 			}
-			continue
+			removed = append(removed, path)
 		}
-		removed = append(removed, path)
 	}
 
 	wrapper := filepath.Join(stateDir, "pads-nativehost")

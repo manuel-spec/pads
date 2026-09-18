@@ -256,3 +256,114 @@ func TestDefaultChromiumIDMatchesManifestKey(t *testing.T) {
 			id.String(), DefaultChromiumID)
 	}
 }
+
+// A Flatpak browser keeps its configuration under ~/.var/app and never reads
+// the native location, so registering only the native directory leaves it with
+// no host and no error to show for it.
+func TestInstallTargetsFlatpakConfigDir(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Flatpak layout is Linux only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A Flatpak Chrome, and no native one.
+	flatpakRoot := filepath.Join(home, ".var", "app", "com.google.Chrome")
+	if err := os.MkdirAll(flatpakRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := Install(Options{StateDir: filepath.Join(home, ".pads")})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want the Flatpak Chrome alone", results)
+	}
+
+	result := results[0]
+	if !result.Flatpak || result.FlatpakAppID != "com.google.Chrome" {
+		t.Fatalf("result = %+v, want a Flatpak Chrome target", result)
+	}
+	want := filepath.Join(flatpakRoot, "config", "google-chrome", "NativeMessagingHosts", "pads.json")
+	if result.ManifestPath != want {
+		t.Fatalf("manifest at %q, want %q", result.ManifestPath, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+
+	// The native directory must not have been created as a side effect.
+	native := filepath.Join(home, ".config", "google-chrome")
+	if _, err := os.Stat(native); !os.IsNotExist(err) {
+		t.Fatalf("native config directory %q was created", native)
+	}
+}
+
+// Both builds of one browser can be installed at once and share nothing, so
+// both have to be registered.
+func TestInstallCoversNativeAndFlatpakTogether(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Flatpak layout is Linux only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := os.MkdirAll(filepath.Join(home, ".config", "google-chrome"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".var", "app", "com.google.Chrome"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _, err := Install(Options{StateDir: filepath.Join(home, ".pads")})
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want a native and a Flatpak registration", len(results))
+	}
+
+	var native, flatpak bool
+	for _, result := range results {
+		if result.Flatpak {
+			flatpak = true
+		} else {
+			native = true
+		}
+	}
+	if !native || !flatpak {
+		t.Fatalf("results = %+v, want one of each", results)
+	}
+
+	// Uninstall has to clear both.
+	removed, err := Uninstall(filepath.Join(home, ".pads"))
+	if err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if len(removed) != 3 {
+		t.Fatalf("removed %v, want two manifests and the wrapper", removed)
+	}
+}
+
+// The grant has to name the binary's directory and the state directory, and
+// nothing wider: the host reads the daemon's address and token, then uses
+// loopback, which a Flatpak browser already shares with the host.
+func TestFlatpakOverrideGrantsOnlyWhatTheHostNeeds(t *testing.T) {
+	cmd := FlatpakOverride("com.google.Chrome", "/opt/pads", "/home/u/.pads")
+
+	for _, want := range []string{
+		"--filesystem=/opt/pads:ro",
+		"--filesystem=/home/u/.pads:ro",
+		"com.google.Chrome",
+		"--user",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("override %q is missing %q", cmd, want)
+		}
+	}
+	// Granting host command execution would be a sandbox escape.
+	if strings.Contains(cmd, "talk-name") || strings.Contains(cmd, "filesystem=home") {
+		t.Errorf("override %q grants more than the host needs", cmd)
+	}
+}

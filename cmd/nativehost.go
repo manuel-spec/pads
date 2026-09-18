@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -63,10 +64,35 @@ var nativehostInstallCmd = &cobra.Command{
 		}
 
 		out := cmd.OutOrStdout()
+		var sandboxed []nativehost.InstallResult
 		for _, result := range results {
-			fmt.Fprintf(out, "%-9s %s\n", result.Browser, result.ManifestPath)
+			label := result.Browser
+			if result.Flatpak {
+				label += " (flatpak)"
+				sandboxed = append(sandboxed, result)
+			}
+			fmt.Fprintf(out, "%-18s %s\n", label, result.ManifestPath)
 		}
-		fmt.Fprintf(out, "%-9s %s\n", "wrapper", wrapper)
+		fmt.Fprintf(out, "%-18s %s\n", "wrapper", wrapper)
+
+		// A sandboxed browser can reach neither the binary nor the control
+		// file until it is granted them, and the failure is silent, so the
+		// command to fix it is printed rather than left to be discovered.
+		if len(sandboxed) > 0 {
+			binaryDir, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			binaryDir = filepath.Dir(binaryDir)
+
+			fmt.Fprintln(out, "\nFlatpak browsers are sandboxed and cannot see the pads binary or")
+			fmt.Fprintln(out, "~/.pads yet. Grant read-only access to both:")
+			for _, result := range sandboxed {
+				fmt.Fprintf(out, "\n  %s\n",
+					nativehost.FlatpakOverride(result.FlatpakAppID, binaryDir, application.Config.StateDir))
+			}
+		}
+
 		fmt.Fprintln(out, "\nBuild the extension with 'make extension', load dist/extension/<browser>,")
 		fmt.Fprintln(out, "then restart the browser so it picks up the host.")
 		return nil
