@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -176,26 +177,83 @@ func (m *Manager) Pause(id string) error {
 	return nil
 }
 
-// List returns a snapshot of all jobs.
+// List returns a snapshot of all jobs with their byte counters refreshed.
 func (m *Manager) List() []Job {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.jobs))
+	for id := range m.jobs {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+
+	progress := m.readProgress(ids)
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]Job, 0, len(m.jobs))
 	for _, job := range m.jobs {
+		snap, ok := progress[job.ID]
+		applyProgress(job, snap, ok)
 		out = append(out, *job)
 	}
 	return out
 }
 
-// Get returns one job by ID.
+// Get returns one job by ID with its byte counters refreshed.
 func (m *Manager) Get(id string) (Job, bool) {
+	progress := m.readProgress([]string{id})
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job, ok := m.jobs[id]
 	if !ok {
 		return Job{}, false
 	}
+	snap, found := progress[id]
+	applyProgress(job, snap, found)
 	return *job, true
+}
+
+// progressSnapshot is one download's byte counters as persisted on disk.
+type progressSnapshot struct {
+	bytes int64
+	total int64
+}
+
+// readProgress reads persisted counters without holding the lock. A job record
+// only knows what was true when it was created; the download's state file is
+// what the downloader keeps current, so progress has to come from there.
+func (m *Manager) readProgress(ids []string) map[string]progressSnapshot {
+	store := m.app.StateStore()
+	out := make(map[string]progressSnapshot, len(ids))
+
+	for _, id := range ids {
+		st, err := store.Load(id)
+		if err != nil {
+			// No state file: the download finished and cleaned up, or this is
+			// the queue worker, whose ID is not a download ID.
+			continue
+		}
+		var done int64
+		for _, seg := range st.Segments {
+			done += seg.BytesDownloaded
+		}
+		out[id] = progressSnapshot{bytes: done, total: st.TotalSize}
+	}
+	return out
+}
+
+// applyProgress folds a snapshot into a job. State files are removed once a
+// download completes, so a missing snapshot keeps the last reading rather than
+// resetting the job to zero.
+func applyProgress(job *Job, snap progressSnapshot, found bool) {
+	if !found {
+		return
+	}
+	job.Bytes = snap.bytes
+	if snap.total > 0 {
+		job.Total = snap.total
+	}
 }
 
 // WaitJob blocks until a job leaves the running state.
@@ -320,5 +378,9 @@ func (m *Manager) finish(id string, err error, ctxErr error) {
 		job.Error = err.Error()
 	default:
 		job.Status = JobComplete
+		if info, statErr := os.Stat(job.Output); statErr == nil {
+			job.Bytes = info.Size()
+			job.Total = info.Size()
+		}
 	}
 }
