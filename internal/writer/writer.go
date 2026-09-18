@@ -36,6 +36,39 @@ func ResumeSegmentTemp(path string) (*SegmentWriter, error) {
 	return &SegmentWriter{path: path, file: file}, nil
 }
 
+// ResumeSegmentTempAt opens a segment temp file for append and reconciles it
+// with the caller's recorded offset. Progress is persisted after the bytes are
+// written, so a file longer than the offset means the process died mid-write or
+// the segment was re-planned while a worker was still running; those trailing
+// bytes are unaccounted for and are discarded. A shorter file wins over the
+// recorded offset, and the usable offset is returned.
+func ResumeSegmentTempAt(path string, offset int64) (*SegmentWriter, int64, error) {
+	if offset < 0 {
+		return nil, 0, fmt.Errorf("resume offset must not be negative")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat segment temp file: %w", err)
+	}
+
+	usable := offset
+	switch {
+	case info.Size() > offset:
+		if err := os.Truncate(path, offset); err != nil {
+			return nil, 0, fmt.Errorf("truncate segment temp file: %w", err)
+		}
+	case info.Size() < offset:
+		usable = info.Size()
+	}
+
+	w, err := ResumeSegmentTemp(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	return w, usable, nil
+}
+
 // Path returns the temp file path.
 func (w *SegmentWriter) Path() string {
 	return w.path
@@ -48,6 +81,23 @@ func (w *SegmentWriter) Write(p []byte) (int, error) {
 		return n, fmt.Errorf("write segment temp file: %w", err)
 	}
 	return n, nil
+}
+
+// Truncate discards file content past size and moves the write position to the
+// new end. It is used when a server ignores a resume Range header and restarts
+// the transfer from byte zero. Without the seek, a writer that was not opened
+// in append mode would leave a hole of zero bytes behind.
+func (w *SegmentWriter) Truncate(size int64) error {
+	if w.file == nil {
+		return fmt.Errorf("segment temp file is closed")
+	}
+	if err := w.file.Truncate(size); err != nil {
+		return fmt.Errorf("truncate segment temp file: %w", err)
+	}
+	if _, err := w.file.Seek(size, io.SeekStart); err != nil {
+		return fmt.Errorf("seek segment temp file: %w", err)
+	}
+	return nil
 }
 
 // Close closes the segment temp file.

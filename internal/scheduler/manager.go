@@ -101,6 +101,23 @@ func (m *SegmentManager) UpdateProgress(id string, bytesDelta int64, speed float
 	}
 }
 
+// SetProgress overwrites a segment's downloaded byte count. It is used when a
+// segment's temp file turns out to hold a different number of bytes than the
+// recorded progress, for example after a steal shortened the segment.
+func (m *SegmentManager) SetProgress(id string, bytesDownloaded int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for i := range m.segments {
+		if m.segments[i].ID != id {
+			continue
+		}
+		m.segments[i].BytesDownloaded = bytesDownloaded
+		m.segments[i].UpdatedAt = time.Now()
+		return
+	}
+}
+
 // Complete marks a segment finished.
 func (m *SegmentManager) Complete(id, tempPath string) {
 	m.mu.Lock()

@@ -80,18 +80,18 @@ type ServerProfile struct {
 
 // DownloadState is persisted resume state for a download.
 type DownloadState struct {
-	Version    int       `json:"version"`
-	ID         string    `json:"id"`
-	URL        string    `json:"url"`
-	Output     string    `json:"output"`
-	TotalSize  int64     `json:"total_size"`
-	Segments   []Segment `json:"segments"`
-	TempDir    string    `json:"temp_dir,omitempty"`
-	Segmented  bool      `json:"segmented"`
-	Paused     bool      `json:"paused"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	Complete   bool      `json:"complete"`
+	Version   int       `json:"version"`
+	ID        string    `json:"id"`
+	URL       string    `json:"url"`
+	Output    string    `json:"output"`
+	TotalSize int64     `json:"total_size"`
+	Segments  []Segment `json:"segments"`
+	TempDir   string    `json:"temp_dir,omitempty"`
+	Segmented bool      `json:"segmented"`
+	Paused    bool      `json:"paused"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Complete  bool      `json:"complete"`
 }
 
 // SchedulerPhase describes the current scheduler phase.
