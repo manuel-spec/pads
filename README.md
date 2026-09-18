@@ -82,8 +82,8 @@ pads daemon run
 
 Then load `extension/firefox/manifest.json` as a temporary add-on from
 `about:debugging`. See [extension/README.md](extension/README.md) for the full
-setup and its limitations, the notable one being that authenticated downloads do
-not carry your session.
+setup, including the opt-in permission that lets downloads behind a login carry
+your browser session.
 
 ## Configuration
 
