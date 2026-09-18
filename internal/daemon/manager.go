@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -35,10 +36,18 @@ type Job struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// ErrShuttingDown is returned when the daemon can no longer accept work.
+var ErrShuttingDown = errors.New("daemon is shutting down")
+
 // Manager runs background downloads and reports their status.
 type Manager struct {
-	app     *app.App
+	app        *app.App
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
+	wg         sync.WaitGroup
+
 	mu      sync.Mutex
+	closed  bool
 	jobs    map[string]*Job
 	cancels map[string]context.CancelFunc
 	queueID string
@@ -46,15 +55,49 @@ type Manager struct {
 
 // NewManager creates an empty job manager.
 func NewManager(application *app.App) *Manager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		app:     application,
-		jobs:    make(map[string]*Job),
-		cancels: make(map[string]context.CancelFunc),
+		app:        application,
+		baseCtx:    ctx,
+		baseCancel: cancel,
+		jobs:       make(map[string]*Job),
+		cancels:    make(map[string]context.CancelFunc),
 	}
 }
 
+// Close cancels every running job and waits for it to stop. Partial progress
+// stays on disk and remains resumable. Close is safe to call more than once.
+func (m *Manager) Close() {
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		m.baseCancel()
+	}
+	m.mu.Unlock()
+	m.wg.Wait()
+}
+
+// claimJobLocked registers a job and returns its context. Jobs descend from the
+// manager's own context, never from a request context, so a download outlives
+// the HTTP call that started it.
+func (m *Manager) claimJobLocked(job *Job) context.Context {
+	ctx, cancel := context.WithCancel(m.baseCtx)
+	m.cancels[job.ID] = cancel
+	m.jobs[job.ID] = job
+	m.wg.Add(1)
+	return ctx
+}
+
+// endJob releases a finished job's cancel function and its wait-group slot.
+func (m *Manager) endJob(id string) {
+	m.mu.Lock()
+	delete(m.cancels, id)
+	m.mu.Unlock()
+	m.wg.Done()
+}
+
 // Start launches a download in the background and returns its job ID.
-func (m *Manager) Start(ctx context.Context, url, output string) (string, error) {
+func (m *Manager) Start(url, output string) (string, error) {
 	if output == "" {
 		name, err := app.FilenameForURL(url)
 		if err != nil {
@@ -63,30 +106,43 @@ func (m *Manager) Start(ctx context.Context, url, output string) (string, error)
 		output = name
 	}
 	id := uuid.NewString()
-	m.register(id, url, output, 0, 0)
-	jobCtx, cancel := context.WithCancel(ctx)
-	m.setCancel(id, cancel)
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return "", ErrShuttingDown
+	}
+	jobCtx := m.claimJobLocked(newJob(id, url, output, 0, 0))
+	m.mu.Unlock()
+
 	go func() {
-		defer m.unregisterCancel(id)
-		m.finish(id, m.app.Download(jobCtx, url, output), jobCtx.Err())
+		defer m.endJob(id)
+		m.finish(id, m.app.DownloadWithID(jobCtx, id, url, output), jobCtx.Err())
 	}()
 	return id, nil
 }
 
 // ResumeJob resumes a saved download state in the background.
-func (m *Manager) ResumeJob(ctx context.Context, id string) error {
+func (m *Manager) ResumeJob(id string) error {
 	st, err := m.app.LoadState(id)
 	if err != nil {
 		return err
 	}
-	if m.isKnown(st.ID) {
-		return fmt.Errorf("job %s already exists", st.ID)
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrShuttingDown
 	}
-	m.register(st.ID, st.URL, st.Output, downloadedOf(st), st.TotalSize)
-	jobCtx, cancel := context.WithCancel(ctx)
-	m.setCancel(st.ID, cancel)
+	if job, ok := m.jobs[st.ID]; ok && job.Status == JobRunning {
+		m.mu.Unlock()
+		return fmt.Errorf("job %s is already running", st.ID)
+	}
+	jobCtx := m.claimJobLocked(newJob(st.ID, st.URL, st.Output, downloadedOf(st), st.TotalSize))
+	m.mu.Unlock()
+
 	go func() {
-		defer m.unregisterCancel(st.ID)
+		defer m.endJob(st.ID)
 		m.finish(st.ID, m.app.Resume(jobCtx, st.ID), jobCtx.Err())
 	}()
 	return nil
@@ -157,81 +213,63 @@ func (m *Manager) WaitJob(id string, timeout time.Duration) (Job, bool) {
 }
 
 // StartQueue processes pending queue entries sequentially in the background.
-func (m *Manager) StartQueue(ctx context.Context) (string, error) {
+func (m *Manager) StartQueue() (string, error) {
 	m.mu.Lock()
-	if m.queueID != "" {
-		if job, ok := m.jobs[m.queueID]; ok && job.Status == JobRunning {
-			m.mu.Unlock()
-			return "", fmt.Errorf("queue worker is already running")
-		}
+	if m.closed {
+		m.mu.Unlock()
+		return "", ErrShuttingDown
+	}
+	if job, ok := m.jobs[m.queueID]; ok && job.Status == JobRunning {
+		m.mu.Unlock()
+		return "", fmt.Errorf("queue worker is already running")
 	}
 	id := uuid.NewString()
 	m.queueID = id
+	jobCtx := m.claimJobLocked(newJob(id, "", "", 0, 0))
 	m.mu.Unlock()
 
-	go m.runQueue(ctx, id)
+	go func() {
+		defer m.endJob(id)
+		m.runQueue(jobCtx, id)
+	}()
 	return id, nil
 }
 
 func (m *Manager) runQueue(ctx context.Context, jobID string) {
-	defer func() {
-		m.mu.Lock()
-		delete(m.cancels, jobID)
-		m.mu.Unlock()
-	}()
-
 	entries, err := m.app.QueueList()
 	if err != nil {
-		m.mu.Lock()
-		m.jobs[jobID] = &Job{ID: jobID, Status: JobFailed, Error: err.Error(), CreatedAt: time.Now(), UpdatedAt: time.Now()}
-		m.mu.Unlock()
+		m.finish(jobID, fmt.Errorf("load queue: %w", err), nil)
 		return
 	}
 
 	for _, entry := range entries {
-		if entry.Status != queue.EntryPending || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			break
+		}
+		if entry.Status != queue.EntryPending {
 			continue
 		}
-		if err := m.runQueueEntry(ctx, jobID, entry); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
+		// A failed entry is recorded on the entry itself; the worker moves on.
+		// Only bookkeeping errors stop the run.
+		if err := m.runQueueEntry(ctx, jobID, entry); err != nil && ctx.Err() == nil {
+			m.finish(jobID, fmt.Errorf("queue entry %s: %w", entry.ID, err), nil)
+			return
 		}
 	}
-
-	m.mu.Lock()
-	if job, ok := m.jobs[jobID]; ok {
-		if ctx.Err() != nil {
-			job.Status = JobPaused
-		} else {
-			job.Status = JobComplete
-		}
-		job.UpdatedAt = time.Now()
-	}
-	m.mu.Unlock()
+	m.finish(jobID, nil, ctx.Err())
 }
 
 func (m *Manager) runQueueEntry(ctx context.Context, jobID string, entry queue.Entry) error {
 	if err := m.app.QueueUpdateStatus(entry.ID, queue.EntryRunning, ""); err != nil {
 		return err
 	}
-
-	m.mu.Lock()
-	m.jobs[jobID] = &Job{
-		ID:        jobID,
-		URL:       entry.URL,
-		Output:    entry.Output,
-		Status:    JobRunning,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-	}
-	m.mu.Unlock()
+	m.setJobTarget(jobID, entry.URL, entry.Output)
 
 	err := m.app.Download(ctx, entry.URL, entry.Output)
 	switch {
 	case ctx.Err() != nil:
-		_ = m.app.QueueUpdateStatus(entry.ID, queue.EntryPending, "")
-		return ctx.Err()
+		// Leave the entry pending so a later queue start picks it up again.
+		return m.app.QueueUpdateStatus(entry.ID, queue.EntryPending, "")
 	case err != nil:
 		return m.app.QueueUpdateStatus(entry.ID, queue.EntryFailed, err.Error())
 	default:
@@ -239,38 +277,31 @@ func (m *Manager) runQueueEntry(ctx context.Context, jobID string, entry queue.E
 	}
 }
 
-func (m *Manager) register(id, url, output string, bytesDone, total int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.jobs[id] = &Job{
+func newJob(id, url, output string, bytesDone, total int64) *Job {
+	now := time.Now()
+	return &Job{
 		ID:        id,
 		URL:       url,
 		Output:    output,
 		Status:    JobRunning,
 		Bytes:     bytesDone,
 		Total:     total,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 }
 
-func (m *Manager) setCancel(id string, cancel context.CancelFunc) {
+// setJobTarget points the queue worker's job at the entry it is downloading.
+func (m *Manager) setJobTarget(id, url, output string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.cancels[id] = cancel
-}
-
-func (m *Manager) unregisterCancel(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.cancels, id)
-}
-
-func (m *Manager) isKnown(id string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.jobs[id]
-	return ok
+	job, ok := m.jobs[id]
+	if !ok {
+		return
+	}
+	job.URL = url
+	job.Output = output
+	job.UpdatedAt = time.Now()
 }
 
 func (m *Manager) finish(id string, err error, ctxErr error) {

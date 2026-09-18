@@ -73,6 +73,11 @@ func FilenameForURL(url string) (string, error) {
 
 // Download runs a single-file download with persistence.
 func (a *App) Download(ctx context.Context, url, output string) error {
+	return a.DownloadWithID(ctx, "", url, output)
+}
+
+// DownloadWithID runs a download using a caller-supplied ID when given.
+func (a *App) DownloadWithID(ctx context.Context, downloadID, url, output string) error {
 	if _, err := util.ValidateURL(url); err != nil {
 		return err
 	}
@@ -87,7 +92,9 @@ func (a *App) Download(ctx context.Context, url, output string) error {
 		return err
 	}
 
-	downloadID := uuid.NewString()
+	if downloadID == "" {
+		downloadID = uuid.NewString()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	a.registry.Register(downloadID, cancel)
 	defer a.registry.Unregister(downloadID)
@@ -145,11 +152,19 @@ func (a *App) Pause(id string) error {
 	return a.state.Save(st)
 }
 
-// Status prints persisted and active download information.
-func (a *App) Status(w io.Writer) error {
+// Status prints persisted download information as JSON. Downloads run in
+// whichever process owns them, so the caller supplies the IDs it knows to be
+// running: the daemon's job list when a daemon is up, this process's registry
+// otherwise.
+func (a *App) Status(w io.Writer, activeIDs []string) error {
 	states, err := a.state.List()
 	if err != nil {
 		return err
+	}
+
+	active := make(map[string]bool, len(activeIDs))
+	for _, id := range activeIDs {
+		active[id] = true
 	}
 
 	type statusEntry struct {
@@ -175,13 +190,13 @@ func (a *App) Status(w io.Writer) error {
 			Output:   st.Output,
 			Paused:   st.Paused,
 			Complete: st.Complete,
-			Active:   a.registry.IsActive(st.ID),
+			Active:   active[st.ID],
 			Bytes:    bytesDone,
 			Total:    st.TotalSize,
 		})
 	}
 
-	for _, id := range a.registry.ActiveIDs() {
+	for _, id := range activeIDs {
 		found := false
 		for _, entry := range entries {
 			if entry.ID == id {
