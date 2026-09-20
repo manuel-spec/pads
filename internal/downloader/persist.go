@@ -36,6 +36,13 @@ func snapshotState(
 ) *model.DownloadState {
 	copyState := *base
 	copyState.Segments = manager.Segments()
+	if base.Headers != nil {
+		copyHeaders := make(map[string]string, len(base.Headers))
+		for k, v := range base.Headers {
+			copyHeaders[k] = v
+		}
+		copyState.Headers = copyHeaders
+	}
 	copyState.Paused = paused
 	copyState.UpdatedAt = time.Now()
 	return &copyState

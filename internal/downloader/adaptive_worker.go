@@ -17,6 +17,7 @@ import (
 type adaptiveWorker struct {
 	downloader *Downloader
 	url        string
+	headers    map[string]string
 	tempDir    string
 	bar        *ui.Bar
 	manager    *scheduler.SegmentManager
@@ -24,7 +25,7 @@ type adaptiveWorker struct {
 }
 
 func (w *adaptiveWorker) Download(ctx context.Context, seg *model.Segment) error {
-	err := w.downloader.downloadSegmentAdaptive(ctx, w.url, seg, w.tempDir, w.bar, w.manager, w.monitor)
+	err := w.downloader.downloadSegmentAdaptive(ctx, w.url, w.headers, seg, w.tempDir, w.bar, w.manager, w.monitor)
 	if err != nil {
 		return err
 	}
@@ -35,6 +36,7 @@ func (w *adaptiveWorker) Download(ctx context.Context, seg *model.Segment) error
 func (d *Downloader) downloadSegmentAdaptive(
 	ctx context.Context,
 	url string,
+	headers map[string]string,
 	seg *model.Segment,
 	tempDir string,
 	bar *ui.Bar,
@@ -43,13 +45,14 @@ func (d *Downloader) downloadSegmentAdaptive(
 ) error {
 	seg.Status = model.SegmentActive
 	return d.withRetries(ctx, func() error {
-		return d.fetchSegmentAdaptive(ctx, url, seg, tempDir, bar, manager, monitor)
+		return d.fetchSegmentAdaptive(ctx, url, headers, seg, tempDir, bar, manager, monitor)
 	})
 }
 
 func (d *Downloader) fetchSegmentAdaptive(
 	ctx context.Context,
 	url string,
+	headers map[string]string,
 	seg *model.Segment,
 	tempDir string,
 	bar *ui.Bar,
@@ -85,7 +88,7 @@ func (d *Downloader) fetchSegmentAdaptive(
 	if err != nil {
 		return fmt.Errorf("create segment request: %w", err)
 	}
-	util.ApplyHeaders(req, d.headers)
+	util.ApplyHeaders(req, headers)
 	req.Header.Set("Range", formatRange(rangeStart, seg.ByteEnd))
 
 	resp, err := util.DoRequest(ctx, d.client, req)
