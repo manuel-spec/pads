@@ -66,13 +66,26 @@ func (b *BandwidthMonitor) AverageSpeed() float64 {
 	return float64(b.total) / span
 }
 
+// Metrics contains a point-in-time consistent snapshot of bandwidth telemetry.
+type Metrics struct {
+	CurrentSpeed float64
+	AverageSpeed float64
+	Velocity     float64
+	ETA          float64
+}
+
+// Snapshot returns a point-in-time consistent snapshot of all bandwidth metrics.
+func (b *BandwidthMonitor) Snapshot(remaining int64) Metrics {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.metricsLocked(time.Now(), remaining)
+}
+
 // Velocity returns the normalized trend between current and average speed.
 func (b *BandwidthMonitor) Velocity() float64 {
-	avg := b.AverageSpeed()
-	if avg <= 0 {
-		return 0
-	}
-	return (b.CurrentSpeed() - avg) / avg
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.metricsLocked(time.Now(), 0).Velocity
 }
 
 // ETA estimates seconds to finish the given remaining bytes.
@@ -80,14 +93,49 @@ func (b *BandwidthMonitor) ETA(remaining int64) float64 {
 	if remaining <= 0 {
 		return 0
 	}
-	speed := b.CurrentSpeed()
-	if speed <= 0 {
-		speed = b.AverageSpeed()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.metricsLocked(time.Now(), remaining).ETA
+}
+
+func (b *BandwidthMonitor) metricsLocked(now time.Time, remaining int64) Metrics {
+	b.trimLocked(now)
+	current := b.speedLocked(b.samples)
+	avg := b.averageSpeedLocked(now)
+
+	var velocity float64
+	if avg > 0 {
+		velocity = (current - avg) / avg
 	}
-	if speed <= 0 {
+
+	var eta float64
+	if remaining > 0 {
+		effectiveSpeed := current
+		if effectiveSpeed <= 0 {
+			effectiveSpeed = avg
+		}
+		if effectiveSpeed > 0 {
+			eta = float64(remaining) / effectiveSpeed
+		}
+	}
+
+	return Metrics{
+		CurrentSpeed: current,
+		AverageSpeed: avg,
+		Velocity:     velocity,
+		ETA:          eta,
+	}
+}
+
+func (b *BandwidthMonitor) averageSpeedLocked(now time.Time) float64 {
+	if len(b.samples) == 0 {
 		return 0
 	}
-	return float64(remaining) / speed
+	span := now.Sub(b.samples[0].at).Seconds()
+	if span <= 0 {
+		return 0
+	}
+	return float64(b.total) / span
 }
 
 func (b *BandwidthMonitor) trimLocked(now time.Time) {

@@ -2,6 +2,7 @@
 
 const daemonEl = document.getElementById("daemon");
 const captureEl = document.getElementById("capture");
+const sessionEl = document.getElementById("session");
 const hintEl = document.getElementById("hint");
 const jobsEl = document.getElementById("jobs");
 const emptyEl = document.getElementById("empty");
@@ -15,9 +16,35 @@ document.addEventListener("DOMContentLoaded", async () => {
     browser.storage.local.set({ capture: captureEl.checked });
   });
 
+  sessionEl.checked = await hasSessionPermission();
+  sessionEl.addEventListener("change", onSessionToggle);
+
   await refresh();
   timer = setInterval(refresh, 1000);
 });
+
+// Firefox only grants an optional permission from a user gesture, which the
+// click on this checkbox provides. The checkbox reflects the real grant, so it
+// is put back if the prompt is dismissed.
+async function onSessionToggle() {
+  try {
+    if (sessionEl.checked) {
+      const granted = await browser.permissions.request(PADS_SESSION_PERMISSION);
+      sessionEl.checked = granted;
+      if (!granted) {
+        showHint("Session forwarding stays off without cookie access.");
+        return;
+      }
+    } else {
+      await browser.permissions.remove(PADS_SESSION_PERMISSION);
+      sessionEl.checked = false;
+    }
+    hideHint();
+  } catch (err) {
+    sessionEl.checked = await hasSessionPermission();
+    showHint(String((err && err.message) || err));
+  }
+}
 
 window.addEventListener("unload", () => {
   if (timer !== null) {

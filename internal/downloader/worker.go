@@ -29,19 +29,21 @@ func (e *HTTPStatusError) Error() string {
 func (d *Downloader) downloadSegment(
 	ctx context.Context,
 	url string,
+	headers map[string]string,
 	seg *model.Segment,
 	tempDir string,
 	bar *ui.Bar,
 ) error {
 	seg.Status = model.SegmentActive
 	return d.withRetries(ctx, func() error {
-		return d.fetchSegmentRange(ctx, url, seg, tempDir, bar)
+		return d.fetchSegmentRange(ctx, url, headers, seg, tempDir, bar)
 	})
 }
 
 func (d *Downloader) fetchSegmentRange(
 	ctx context.Context,
 	url string,
+	headers map[string]string,
 	seg *model.Segment,
 	tempDir string,
 	bar *ui.Bar,
@@ -56,6 +58,7 @@ func (d *Downloader) fetchSegmentRange(
 	if err != nil {
 		return fmt.Errorf("create segment request: %w", err)
 	}
+	util.ApplyHeaders(req, headers)
 	req.Header.Set("Range", formatRange(seg.ByteStart, seg.ByteEnd))
 
 	resp, err := util.DoRequest(ctx, d.client, req)

@@ -71,18 +71,41 @@ func FilenameForURL(url string) (string, error) {
 	return util.FilenameFromURL(url)
 }
 
-// Download runs a single-file download with persistence.
-func (a *App) Download(ctx context.Context, url, output string) error {
-	return a.DownloadWithID(ctx, "", url, output)
+// DownloadRequest describes one download to start.
+type DownloadRequest struct {
+	// ID is optional; a new one is generated when it is empty.
+	ID     string
+	URL    string
+	Output string
+	// Headers are request headers to forward, such as the session cookies a
+	// browser extension captured. They are validated before use.
+	Headers map[string]string
 }
 
-// DownloadWithID runs a download using a caller-supplied ID when given.
+// Download runs a single-file download with persistence.
+func (a *App) Download(ctx context.Context, url, output string) error {
+	return a.Start(ctx, DownloadRequest{URL: url, Output: output})
+}
+
+// DownloadWithID runs a download using a caller-supplied ID.
 func (a *App) DownloadWithID(ctx context.Context, downloadID, url, output string) error {
-	if _, err := util.ValidateURL(url); err != nil {
+	return a.Start(ctx, DownloadRequest{ID: downloadID, URL: url, Output: output})
+}
+
+// Start runs a download described by req.
+func (a *App) Start(ctx context.Context, req DownloadRequest) error {
+	if _, err := util.ValidateURL(req.URL); err != nil {
 		return err
 	}
+
+	headers, err := util.ValidateHeaders(req.Headers)
+	if err != nil {
+		return err
+	}
+
+	output := req.Output
 	if output == "" {
-		name, err := util.FilenameFromURL(url)
+		name, err := util.FilenameFromURL(req.URL)
 		if err != nil {
 			return err
 		}
@@ -92,6 +115,7 @@ func (a *App) DownloadWithID(ctx context.Context, downloadID, url, output string
 		return err
 	}
 
+	downloadID := req.ID
 	if downloadID == "" {
 		downloadID = uuid.NewString()
 	}
@@ -101,10 +125,11 @@ func (a *App) DownloadWithID(ctx context.Context, downloadID, url, output string
 
 	dl := downloader.New(a.Config)
 	return dl.Run(ctx, downloader.Options{
-		URL:        url,
+		URL:        req.URL,
 		Output:     output,
 		DownloadID: downloadID,
 		Store:      a.state,
+		Headers:    headers,
 	})
 }
 

@@ -68,9 +68,9 @@ func (c *Client) Jobs(ctx context.Context) ([]Job, error) {
 }
 
 // Start hands a new download to the daemon and returns its job ID.
-func (c *Client) Start(ctx context.Context, url, output string) (string, error) {
+func (c *Client) Start(ctx context.Context, url, output string, headers map[string]string) (string, error) {
 	var resp startResponse
-	body := startRequest{URL: url, Output: output}
+	body := startRequest{URL: url, Output: output, Headers: headers}
 	if err := c.do(ctx, http.MethodPost, "/api/v1/downloads", body, &resp); err != nil {
 		return "", err
 	}

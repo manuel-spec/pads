@@ -12,6 +12,9 @@
 coverage.out
 coverage.html
 
+# Build output
+dist/
+
 # Go workspace
 vendor/
 

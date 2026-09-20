@@ -13,6 +13,7 @@ import (
 type SegmentManager struct {
 	mu             sync.RWMutex
 	segments       []model.Segment
+	indexByID      map[string]int
 	totalSize      int64
 	minSegmentSize int64
 	nextID         int
@@ -21,8 +22,14 @@ type SegmentManager struct {
 // NewSegmentManager creates a manager for the planned segments.
 func NewSegmentManager(segments []model.Segment, totalSize, minSegmentSize int64) *SegmentManager {
 	nextID := len(segments)
+	copied := append([]model.Segment(nil), segments...)
+	indexByID := make(map[string]int, len(copied))
+	for i, seg := range copied {
+		indexByID[seg.ID] = i
+	}
 	return &SegmentManager{
-		segments:       append([]model.Segment(nil), segments...),
+		segments:       copied,
+		indexByID:      indexByID,
 		totalSize:      totalSize,
 		minSegmentSize: minSegmentSize,
 		nextID:         nextID,
@@ -59,11 +66,9 @@ func (m *SegmentManager) Get(id string) (*model.Segment, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	for i := range m.segments {
-		if m.segments[i].ID == id {
-			seg := m.segments[i]
-			return &seg, true
-		}
+	if idx, ok := m.indexByID[id]; ok && idx < len(m.segments) {
+		seg := m.segments[idx]
+		return &seg, true
 	}
 	return nil, false
 }
@@ -73,11 +78,8 @@ func (m *SegmentManager) SetTempPath(id, path string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for i := range m.segments {
-		if m.segments[i].ID == id {
-			m.segments[i].TempPath = path
-			return
-		}
+	if idx, ok := m.indexByID[id]; ok && idx < len(m.segments) {
+		m.segments[idx].TempPath = path
 	}
 }
 
@@ -86,18 +88,16 @@ func (m *SegmentManager) UpdateProgress(id string, bytesDelta int64, speed float
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for i := range m.segments {
-		if m.segments[i].ID != id {
-			continue
-		}
-		m.segments[i].BytesDownloaded += bytesDelta
-		m.segments[i].SpeedBPS = speed
-		m.segments[i].UpdatedAt = time.Now()
-		remaining := m.segments[i].RemainingBytes()
-		if speed > 0 {
-			m.segments[i].ETASeconds = float64(remaining) / speed
-		}
+	idx, ok := m.indexByID[id]
+	if !ok || idx >= len(m.segments) {
 		return
+	}
+	m.segments[idx].BytesDownloaded += bytesDelta
+	m.segments[idx].SpeedBPS = speed
+	m.segments[idx].UpdatedAt = time.Now()
+	remaining := m.segments[idx].RemainingBytes()
+	if speed > 0 {
+		m.segments[idx].ETASeconds = float64(remaining) / speed
 	}
 }
 
@@ -108,14 +108,12 @@ func (m *SegmentManager) SetProgress(id string, bytesDownloaded int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for i := range m.segments {
-		if m.segments[i].ID != id {
-			continue
-		}
-		m.segments[i].BytesDownloaded = bytesDownloaded
-		m.segments[i].UpdatedAt = time.Now()
+	idx, ok := m.indexByID[id]
+	if !ok || idx >= len(m.segments) {
 		return
 	}
+	m.segments[idx].BytesDownloaded = bytesDownloaded
+	m.segments[idx].UpdatedAt = time.Now()
 }
 
 // Complete marks a segment finished.
@@ -123,15 +121,13 @@ func (m *SegmentManager) Complete(id, tempPath string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for i := range m.segments {
-		if m.segments[i].ID != id {
-			continue
-		}
-		m.segments[i].Status = model.SegmentComplete
-		m.segments[i].TempPath = tempPath
-		m.segments[i].UpdatedAt = time.Now()
+	idx, ok := m.indexByID[id]
+	if !ok || idx >= len(m.segments) {
 		return
 	}
+	m.segments[idx].Status = model.SegmentComplete
+	m.segments[idx].TempPath = tempPath
+	m.segments[idx].UpdatedAt = time.Now()
 }
 
 // Fail marks a segment failed.
@@ -139,14 +135,12 @@ func (m *SegmentManager) Fail(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for i := range m.segments {
-		if m.segments[i].ID != id {
-			continue
-		}
-		m.segments[i].Status = model.SegmentFailed
-		m.segments[i].UpdatedAt = time.Now()
+	idx, ok := m.indexByID[id]
+	if !ok || idx >= len(m.segments) {
 		return
 	}
+	m.segments[idx].Status = model.SegmentFailed
+	m.segments[idx].UpdatedAt = time.Now()
 }
 
 // Activate marks a pending segment active.
@@ -154,16 +148,14 @@ func (m *SegmentManager) Activate(id string) (*model.Segment, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for i := range m.segments {
-		if m.segments[i].ID != id || m.segments[i].Status != model.SegmentPending {
-			continue
-		}
-		m.segments[i].Status = model.SegmentActive
-		m.segments[i].UpdatedAt = time.Now()
-		seg := m.segments[i]
-		return &seg, true
+	idx, ok := m.indexByID[id]
+	if !ok || idx >= len(m.segments) || m.segments[idx].Status != model.SegmentPending {
+		return nil, false
 	}
-	return nil, false
+	m.segments[idx].Status = model.SegmentActive
+	m.segments[idx].UpdatedAt = time.Now()
+	seg := m.segments[idx]
+	return &seg, true
 }
 
 // RequeueAllActive moves every active segment back to pending.
@@ -184,17 +176,12 @@ func (m *SegmentManager) RequeueActive(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for i := range m.segments {
-		if m.segments[i].ID != id {
-			continue
-		}
-		if m.segments[i].Status != model.SegmentActive {
-			return
-		}
-		m.segments[i].Status = model.SegmentPending
-		m.segments[i].UpdatedAt = time.Now()
+	idx, ok := m.indexByID[id]
+	if !ok || idx >= len(m.segments) || m.segments[idx].Status != model.SegmentActive {
 		return
 	}
+	m.segments[idx].Status = model.SegmentPending
+	m.segments[idx].UpdatedAt = time.Now()
 }
 
 // ActiveCount returns the number of active segments.
@@ -331,6 +318,7 @@ func (m *SegmentManager) StealSlowest(avgSpeed float64) (stolenID string, newSeg
 	}
 
 	m.segments = append(m.segments, newSegment)
+	m.indexByID[newSegment.ID] = len(m.segments) - 1
 	return seg.ID, &newSegment, true
 }
 

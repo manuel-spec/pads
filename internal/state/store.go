@@ -55,8 +55,10 @@ func (s *Store) Save(st *model.DownloadState) error {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 
+	// State may carry forwarded request headers, including session cookies, so
+	// it is readable only by its owner.
 	tmp := s.Path(st.ID) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("write state: %w", err)
 	}
 	if err := os.Rename(tmp, s.Path(st.ID)); err != nil {
@@ -169,5 +171,5 @@ func NormalizeForResume(st *model.DownloadState) {
 
 func (s *Store) quarantine(id string, data []byte) error {
 	path := filepath.Join(s.dir, id+".corrupt")
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o600)
 }

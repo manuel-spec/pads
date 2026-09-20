@@ -26,6 +26,8 @@ type Options struct {
 	DownloadID string
 	Resume     *model.DownloadState
 	Store      *state.Store
+	// Headers are forwarded request headers, already validated by the caller.
+	Headers map[string]string
 }
 
 // Downloader performs HTTP downloads.
@@ -45,6 +47,8 @@ func New(cfg *config.Config) *Downloader {
 
 // Run probes the server and downloads using segmented or single-connection mode.
 func (d *Downloader) Run(ctx context.Context, opts Options) error {
+	headers := opts.Headers
+
 	if opts.Resume != nil {
 		return d.runFromState(ctx, opts.Resume, opts.Store)
 	}
@@ -61,15 +65,16 @@ func (d *Downloader) Run(ctx context.Context, opts Options) error {
 
 	profile, err := probe.Probe(ctx, d.client, parsed.String(), probe.Options{
 		Timeout: time.Duration(d.cfg.ProbeTimeoutMS) * time.Millisecond,
+		Headers: headers,
 	})
 	if err != nil {
 		return fmt.Errorf("probe server: %w", err)
 	}
 
 	if d.shouldUseSegments(profile) {
-		return d.runSegmented(ctx, parsed.String(), output, profile, nil, opts)
+		return d.runSegmented(ctx, parsed.String(), output, profile, nil, headers, opts)
 	}
-	return d.runSingle(ctx, parsed.String(), output, profile, nil, opts)
+	return d.runSingle(ctx, parsed.String(), output, profile, nil, headers, opts)
 }
 
 func (d *Downloader) runFromState(ctx context.Context, st *model.DownloadState, store *state.Store) error {
@@ -77,8 +82,13 @@ func (d *Downloader) runFromState(ctx context.Context, st *model.DownloadState, 
 		return fmt.Errorf("invalid resume state: %w", err)
 	}
 
+	// Headers were saved with the state; a resume has to authenticate the same
+	// way the original download did.
+	headers := st.Headers
+
 	profile, err := probe.Probe(ctx, d.client, st.URL, probe.Options{
 		Timeout: time.Duration(d.cfg.ProbeTimeoutMS) * time.Millisecond,
+		Headers: headers,
 	})
 	if err != nil {
 		return fmt.Errorf("probe server for resume: %w", err)
@@ -89,9 +99,9 @@ func (d *Downloader) runFromState(ctx context.Context, st *model.DownloadState, 
 
 	opts := Options{Resume: st, Store: store, DownloadID: st.ID}
 	if st.Segmented {
-		return d.runSegmented(ctx, st.URL, st.Output, profile, st, opts)
+		return d.runSegmented(ctx, st.URL, st.Output, profile, st, headers, opts)
 	}
-	return d.runSingle(ctx, st.URL, st.Output, profile, st, opts)
+	return d.runSingle(ctx, st.URL, st.Output, profile, st, headers, opts)
 }
 
 func (d *Downloader) shouldUseSegments(profile *model.ServerProfile) bool {
@@ -105,6 +115,7 @@ func (d *Downloader) runSegmented(
 	url, output string,
 	profile *model.ServerProfile,
 	existing *model.DownloadState,
+	headers map[string]string,
 	opts Options,
 ) error {
 	downloadID := opts.DownloadID
@@ -140,6 +151,7 @@ func (d *Downloader) runSegmented(
 	downloadState := existing
 	if downloadState == nil {
 		downloadState = newDownloadState(downloadID, url, output, tempDir, profile.ContentLength, segments, true)
+		downloadState.Headers = headers
 	}
 	if opts.Store != nil {
 		if err := opts.Store.Save(downloadState); err != nil {
@@ -160,6 +172,7 @@ func (d *Downloader) runSegmented(
 	worker := &adaptiveWorker{
 		downloader: d,
 		url:        url,
+		headers:    headers,
 		tempDir:    tempDir,
 		bar:        bar,
 		manager:    manager,
@@ -223,6 +236,7 @@ func (d *Downloader) runSingle(
 	url, output string,
 	profile *model.ServerProfile,
 	existing *model.DownloadState,
+	headers map[string]string,
 	opts Options,
 ) error {
 	downloadID := opts.DownloadID
@@ -267,6 +281,7 @@ func (d *Downloader) runSingle(
 			segments[0].ByteEnd = 0
 		}
 		downloadState = newDownloadState(downloadID, url, output, tempDir, profile.ContentLength, segments, false)
+		downloadState.Headers = headers
 	}
 	if opts.Store != nil {
 		if err := opts.Store.Save(downloadState); err != nil {
@@ -277,7 +292,7 @@ func (d *Downloader) runSingle(
 	progress := ui.NewProgress(profile.ContentLength)
 	bar := progress.AddBar("download")
 
-	total, err := d.downloadAll(ctx, url, segWriter, bar, profile.ContentLength, bytesDone, func(downloaded int64) {
+	total, err := d.downloadAll(ctx, url, headers, segWriter, bar, profile.ContentLength, bytesDone, func(downloaded int64) {
 		if len(downloadState.Segments) == 0 {
 			return
 		}
@@ -326,6 +341,7 @@ func (d *Downloader) runSingle(
 func (d *Downloader) downloadAll(
 	ctx context.Context,
 	url string,
+	headers map[string]string,
 	segWriter *writer.SegmentWriter,
 	bar *ui.Bar,
 	expectedSize int64,
@@ -336,6 +352,7 @@ func (d *Downloader) downloadAll(
 	if err != nil {
 		return offset, fmt.Errorf("create download request: %w", err)
 	}
+	util.ApplyHeaders(req, headers)
 	if offset > 0 {
 		req.Header.Set("Range", formatRange(offset, expectedSize-1))
 	}

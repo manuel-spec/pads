@@ -241,3 +241,61 @@ func TestJobsMapsDaemonFields(t *testing.T) {
 		t.Fatalf("job mapped incorrectly: %+v", job)
 	}
 }
+
+// Session headers must reach the daemon so a download behind a login works.
+func TestStartForwardsSessionHeaders(t *testing.T) {
+	cfg := testConfig(t)
+
+	var gotHeaders map[string]string
+	fakeDaemon(t, cfg, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Headers map[string]string `json:"headers"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		gotHeaders = body.Headers
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "job-1"})
+	})
+
+	host := New(cfg)
+	resp := host.handle(context.Background(), []byte(
+		`{"type":"start","url":"http://example.test/f.bin","headers":{"Cookie":"session=abc","Referer":"http://example.test/"}}`))
+
+	if !resp.OK {
+		t.Fatalf("response not ok: %s", resp.Error)
+	}
+	if gotHeaders["Cookie"] != "session=abc" {
+		t.Fatalf("forwarded headers = %v, want the session cookie", gotHeaders)
+	}
+	if gotHeaders["Referer"] != "http://example.test/" {
+		t.Fatalf("forwarded headers = %v, want the referer", gotHeaders)
+	}
+}
+
+// A compromised or buggy extension must not be able to set headers the
+// downloader manages, and the rejection happens before any job is created.
+func TestStartRejectsUnlistedHeaders(t *testing.T) {
+	cfg := testConfig(t)
+
+	called := false
+	fakeDaemon(t, cfg, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	host := New(cfg)
+	resp := host.handle(context.Background(), []byte(
+		`{"type":"start","url":"http://example.test/f.bin","headers":{"Range":"bytes=0-10"}}`))
+
+	if resp.OK {
+		t.Fatal("expected a Range header to be rejected")
+	}
+	if !strings.Contains(resp.Error, "Range") {
+		t.Fatalf("error = %q, want it to name the header", resp.Error)
+	}
+	if called {
+		t.Fatal("the daemon was contacted despite an invalid header")
+	}
+}

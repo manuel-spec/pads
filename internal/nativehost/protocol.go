@@ -22,6 +22,9 @@ type Request struct {
 	URL      string `json:"url,omitempty"`
 	Filename string `json:"filename,omitempty"`
 	ID       string `json:"id,omitempty"`
+	// Headers carry the browser session for a download that needs one. The
+	// daemon accepts only a fixed set; anything else is rejected here.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // Response is the host's reply. Every reply carries OK so the extension never

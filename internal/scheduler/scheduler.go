@@ -36,6 +36,11 @@ type Options struct {
 	OnTick      func() error
 }
 
+type workerEvent struct {
+	segmentID string
+	err       error
+}
+
 // Scheduler coordinates adaptive connection scaling and segment stealing.
 type Scheduler struct {
 	opts          Options
@@ -44,6 +49,7 @@ type Scheduler struct {
 	phase         model.SchedulerPhase
 	workersMu     sync.Mutex
 	workerCancels map[string]context.CancelFunc
+	workerEvents  chan workerEvent
 	firstErr      error
 	errOnce       sync.Once
 	wg            sync.WaitGroup
@@ -64,10 +70,16 @@ func Run(parent context.Context, opts Options) error {
 		opts.InitialConn = opts.MaxConns
 	}
 
+	eventBufSize := opts.MaxConns * 2
+	if eventBufSize < 16 {
+		eventBufSize = 16
+	}
+
 	s := &Scheduler{
 		opts:          opts,
 		phase:         model.PhaseRamp,
 		workerCancels: make(map[string]context.CancelFunc),
+		workerEvents:  make(chan workerEvent, eventBufSize),
 	}
 
 	ctx, cancel := context.WithCancel(parent)
@@ -102,6 +114,15 @@ func Run(parent context.Context, opts Options) error {
 				return fmt.Errorf("scheduler finished with incomplete segments")
 			}
 			return nil
+		case ev := <-s.workerEvents:
+			if ev.err != nil && ev.err != context.Canceled {
+				s.cancelAll()
+			} else if opts.Manager.AllComplete() {
+				s.cancelAll()
+			} else if s.opts.Manager.PendingCount() > 0 {
+				// A worker finished and pending segments exist; immediately start next without waiting for tick
+				s.startNextWorker(ctx)
+			}
 		case <-ticker.C:
 			s.tick(ctx)
 			if opts.Manager.AllComplete() {
@@ -241,15 +262,35 @@ func (s *Scheduler) launchWorker(ctx context.Context, seg *model.Segment) {
 			return
 		}
 
-		if err := s.opts.Worker.Download(workerCtx, current); err != nil {
+		err := s.opts.Worker.Download(workerCtx, current)
+		if err != nil {
 			if workerCtx.Err() != nil {
 				// Writing has stopped, so the segment is safe to hand back.
 				s.opts.Manager.RequeueActive(segmentID)
+				if s.workerEvents != nil {
+					select {
+					case s.workerEvents <- workerEvent{segmentID: segmentID, err: context.Canceled}:
+					default:
+					}
+				}
 				return
 			}
 			s.opts.Manager.Fail(segmentID)
 			s.errOnce.Do(func() { s.firstErr = fmt.Errorf("segment %s: %w", segmentID, err) })
+			if s.workerEvents != nil {
+				select {
+				case s.workerEvents <- workerEvent{segmentID: segmentID, err: err}:
+				default:
+				}
+			}
 			return
+		}
+
+		if s.workerEvents != nil {
+			select {
+			case s.workerEvents <- workerEvent{segmentID: segmentID, err: nil}:
+			default:
+			}
 		}
 	}(seg.ID)
 }

@@ -96,6 +96,12 @@ func (h *Host) start(ctx context.Context, req Request) Response {
 		return errorResponse(err)
 	}
 
+	// Validate here as well as in the daemon: a clear rejection beats a job
+	// that the extension believes started.
+	if _, err := util.ValidateHeaders(req.Headers); err != nil {
+		return errorResponse(err)
+	}
+
 	output, err := h.outputPath(req.URL, req.Filename)
 	if err != nil {
 		return errorResponse(err)
@@ -105,7 +111,7 @@ func (h *Host) start(ctx context.Context, req Request) Response {
 	if err != nil {
 		return errorResponse(errNoDaemon(err))
 	}
-	id, err := client.Start(ctx, req.URL, output)
+	id, err := client.Start(ctx, req.URL, output, req.Headers)
 	if err != nil {
 		return errorResponse(err)
 	}
