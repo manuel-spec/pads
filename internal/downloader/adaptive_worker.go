@@ -105,11 +105,31 @@ func (d *Downloader) fetchSegmentAdaptive(
 	lastReport := time.Now()
 	var windowBytes int64
 
-	written, err := copyWithProgressCallback(ctx, resp.Body, segWriter, expected, func(n int64) {
+	const batchBytesThreshold = 128 * 1024
+	const batchTimeThreshold = 100 * time.Millisecond
+	var batchedBytes int64
+	lastFlush := time.Now()
+
+	flushProgress := func() {
+		if batchedBytes <= 0 {
+			return
+		}
+		n := batchedBytes
+		batchedBytes = 0
+		lastFlush = time.Now()
+
 		bar.Add(n)
 		monitor.Record(n)
 		manager.UpdateProgress(seg.ID, n, segmentSpeed(&lastReport, &windowBytes, n))
+	}
+
+	written, err := copyWithProgressCallback(ctx, resp.Body, segWriter, expected, func(n int64) {
+		batchedBytes += n
+		if batchedBytes >= batchBytesThreshold || time.Since(lastFlush) >= batchTimeThreshold {
+			flushProgress()
+		}
 	})
+	flushProgress()
 	if err != nil {
 		return err
 	}
